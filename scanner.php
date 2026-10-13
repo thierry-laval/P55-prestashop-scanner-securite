@@ -2408,25 +2408,43 @@ MODAL de détails - Affichage du contexte du fichier
             <p>Rien ne garantit qu’un scan détecte 100% des menaces. Voici les vérifications complémentaires à effectuer et les bonnes pratiques en cas de suspicion :</p>
             <ul>
                 <li><strong>Comparer l’intégrité :</strong> comparez les hash (MD5/SHA) des fichiers avec une copie propre de la même version de PrestaShop.</li>
-                <li><strong>Fichiers récents :</strong> listez les fichiers modifiés récemment (ex. <code>find /chemin/vers/site -type f -mtime -30 -print</code>).</li>
+                <li><strong>Fichiers récents :</strong> listez les fichiers modifiés récemment. <code>-mtime</code> raisonne en jours entiers (24h glissantes) et <strong>excluez les dossiers de cache/logs</strong> qui changent en permanence, sinon la liste est noyée de faux résultats :
+                    <pre><code>find /chemin/vers/site -type f -mtime -30 -print \
+  -not -path "*/var/cache/*" -not -path "*/var/logs/*" -not -path "*/img/tmp/*"</code></pre>
+                </li>
                 <li><strong>PHP dans uploads :</strong> vérifiez qu’aucun fichier PHP ne se trouve dans les répertoires d’upload publics.</li>
-                <li><strong>Droits et permissions :</strong> détectez les fichiers world‑writable (<code>find /chemin/vers/site -type f -perm /o+w -ls</code>).</li>
-                <li><strong>.htaccess :</strong> recherchez les directives suspectes (<code>auto_prepend_file</code>, <code>AddHandler</code>, <code>SetHandler</code>, <code>RewriteRule</code>).</li>
-                <li><strong>Crons :</strong> vérifiez les tâches planifiées pour des exécutions inattendues (<code>crontab -l</code> et crontabs des comptes système).</li>
-                <li><strong>Processus & connexions :</strong> surveillez les processus PHP/serveur et connexions réseau inhabituelles.</li>
+                <li><strong>Extensions trompeuses :</strong> cherchez les fichiers PHP déguisés — double extension (<code>.php.jpg</code>), variantes (<code>.php5</code>, <code>.php7</code>, <code>.phtml</code>, <code>.phar</code>) — fréquemment utilisées pour contourner les filtres :
+                    <pre><code>find /chemin/vers/site -type f \( -name "*.php.*" -o -name "*.phtml" -o -name "*.phar" -o -name "*.php[0-9]" \)</code></pre>
+                </li>
+                <li><strong>Droits et permissions :</strong> détectez les fichiers world‑writable. <em>Syntaxe GNU/Linux</em> (serveur) :
+                    <pre><code>find /chemin/vers/site -type f -perm /o+w -ls</code></pre>
+                    <em>Sur macOS/BSD</em>, le préfixe est <code>+</code> et non <code>/</code> : <code>find ... -perm +o+w</code>.
+                </li>
+                <li><strong>.htaccess :</strong> recherchez les directives suspectes : <code>auto_prepend_file</code>, <code>auto_append_file</code>, <code>AddHandler</code>, <code>SetHandler</code>, <code>RewriteRule</code>, <code>&lt;FilesMatch&gt;</code>, <code>AddType</code> — mais aussi <strong><code>ErrorDocument</code></strong> (ex. <code>ErrorDocument 404 /malveillant.php</code>), vecteur de backdoor très courant et souvent oublié.</li>
+                <li><strong>.user.ini :</strong> équivalent PHP-FPM du <code>.htaccess</code>, à vérifier au même titre (il peut redéfinir <code>auto_prepend_file</code>). Souvent oublié dans les audits.</li>
+                <li><strong>Crons :</strong> vérifiez les tâches planifiées pour des exécutions inattendues (<code>crontab -l</code> et crontabs des comptes système), ainsi que les tâches ponctuelles avec <code>atq</code>.</li>
+                <li><strong>Processus &amp; connexions :</strong> surveillez les processus PHP/serveur et connexions réseau inhabituelles (ex. <code>ps aux</code>, <code>ss -tup</code>).</li>
                 <li><strong>Logs :</strong> analysez <code>error_log</code>, <code>access_log</code> et les logs d’application autour des dates suspectes.</li>
-                <li><strong>Base de données :</strong> vérifiez l’existence de comptes admin inconnus et l’intégrité des tables modules.</li>
+                <li><strong>Base de données :</strong> au‑delà des comptes admin inconnus, vérifiez surtout :
+                    <ul>
+                        <li><code>ps_configuration</code> : valeurs contenant du <strong>code JS/iframe injecté</strong> (les skimmers « stockés » en base sont invisibles dans les fichiers) ;</li>
+                        <li><code>ps_employee</code> : comptes admin inconnus, comptes désactivés, dates de dernière modification de mot de passe (<code>last_passwd_gen</code>) ;</li>
+                        <li><code>ps_module</code> / <code>ps_hook_module</code> : modules fantômes ou greffés sur des hooks inattendus.</li>
+                    </ul>
+                </li>
+                <li><strong>Backups exposés :</strong> vérifiez qu’aucun fichier de sauvegarde (<code>*.sql</code>, <code>*.zip</code>, <code>*.tar.gz</code>, <code>*.bak</code>) n’est accessible en HTTP.</li>
                 <li><strong>Modules exposés :</strong> supprimez PHPUnit, outils de dev ou autres consoles présentes en production.</li>
-                <li><strong>Scan externe / antivirus :</strong> lancez un scan Sucuri/antivirus/YARA pour une seconde opinion.</li>
+                <li><strong>Scan externe / antivirus :</strong> lancez un scan Sucuri/urlscan.io/antivirus/YARA pour une seconde opinion.</li>
             </ul>
 
             <h6>Procédure si compromission suspectée</h6>
             <ol>
-                <li>Isoler la plateforme (mode maintenance / couper accès public).</li>
+                <li>Isoler la plateforme (mode maintenance / couper l’accès public).</li>
                 <li>Prendre un snapshot + sauvegarde complète (fichiers + base).</li>
-                <li>Changer tous les mots de passe (FTP, SSH, DB, admin).</li>
-                <li>Restaurer depuis un backup propre si possible; sinon lancer une analyse forensique.</li>
-                <li>Corriger l’origine (module vulnérable, compte compromis, faille d’injection) avant remise en production.</li>
+                <li><strong>Identifier et corriger l’origine</strong> (module vulnérable, compte compromis, faille d’injection). C’est l’étape prioritaire : sans elle, l’attaquant revient.</li>
+                <li>Restaurer depuis un backup propre si possible ; sinon lancer une analyse forensique.</li>
+                <li><strong>Changer tous les secrets APRÈS avoir corrigé la faille</strong> : mots de passe (FTP, SSH, DB, admin) <strong>et clés API</strong> (webservice PrestaShop). Les changer avant la correction est inutile : la faille encore active permettrait de les re‑compromettre.</li>
+                <li>Vérifier que la remise en production est propre (re‑scanner, tester), puis surveiller les logs.</li>
             </ol>
 
             <hr>
@@ -2437,9 +2455,10 @@ MODAL de détails - Affichage du contexte du fichier
                 <li>Testez chaque changement dans un environnement de staging identique.</li>
                 <li>Appliquez les modifications progressivement et surveillez les logs (PHP/Apache/Nginx).</li>
                 <li>Pour <code>session.cookie_secure</code>, n’activez que si le site est en HTTPS.</li>
-                <li>Pour <code>open_basedir</code> et <code>disable_functions</code>, veillez à inclure tous les chemins/fonctions nécessaires aux modules utilisés.</li>
+                <li>Pour <code>open_basedir</code>, notez qu’il est <strong>souvent déjà restreint par l’hébergeur</strong> (surtout en mutualisé) : inutile de le redéfinir vous‑même si c’est le cas.</li>
+                <li>Pour <code>disable_functions</code>, veillez à inclure tous les chemins/fonctions nécessaires aux modules utilisés : désactiver <code>exec</code> peut casser des modules légitimes (génération PDF, traitement d’images).</li>
             </ul>
-            <p><strong>En cas de doute :</strong> ne changez rien en production sans test; contacte ton hébergeur ou un prestataire sécurité.</p>
+            <p><strong>En cas de doute :</strong> ne changez rien en production sans test ; contactez votre hébergeur ou un prestataire sécurité.</p>
         </div>
     </div>
 </div>
