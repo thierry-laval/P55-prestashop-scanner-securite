@@ -1843,48 +1843,54 @@ function group_by_file($infected_files) {
                 </div>
 
 <!-- =====================================================================
-RÉSUMÉ STATISTIQUE - CARTES DE SÉVÉRITÉ
+RÉSUMÉ STATISTIQUE - ONGLETS DE SÉVÉRITÉ
 =====================================================================
-    Affiche 3 cartes Bootstrap côte à côte pour visualiser rapidement
-    le nombre d'issues critiques, avertissements et informations.
+    Les 3 catégories (critiques, avertissements, informations) sont présentées
+    sous forme d'onglets cliquables. Chaque onglet affiche le compteur ET la
+    liste des fichiers concernés (voir plus bas la zone de contenu des onglets).
 
     Couleurs :
     - bg-danger : critique (rouge)
     - bg-warning : avertissement (orange/jaune)
     - bg-info : information (bleu clair)
 ===================================================================== -->
-                <?php $stats = get_statistics($infected_files); ?>
-                <div class="row mb-4">
-                    <!-- Carte des issues critiques -->
-                    <div class="col-md-4">
-                        <div class="card text-center bg-danger text-white">
-                            <div class="card-body">
-                                <h5 class="card-title">Issues Critiques</h5>
-                                <p class="card-text" style="font-size: 2rem;"><strong><?php echo $stats['critical']; ?></strong></p>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <!-- Carte des avertissements -->
-                    <div class="col-md-4">
-                        <div class="card text-center bg-warning text-dark">
-                            <div class="card-body">
-                                <h5 class="card-title">Avertissements</h5>
-                                <p class="card-text" style="font-size: 2rem;"><strong><?php echo $stats['warning']; ?></strong></p>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <!-- Carte des informations -->
-                    <div class="col-md-4">
-                        <div class="card text-center bg-info text-dark">
-                            <div class="card-body">
-                                <h5 class="card-title">Informations</h5>
-                                <p class="card-text" style="font-size: 2rem;"><strong><?php echo $stats['info']; ?></strong></p>
-                            </div>
-                        </div>
-                    </div>
-                </div>
+                <?php
+                $stats = get_statistics($infected_files);
+                // Regroupement des fichiers par sévérité (la plus grave du fichier).
+                $grouped_files = group_by_file($infected_files);
+                $groups_by_severity = ['critical' => [], 'warning' => [], 'info' => []];
+                foreach ($grouped_files as $g) {
+                    $sev = $g['severity'] ?? 'info';
+                    if (isset($groups_by_severity[$sev])) $groups_by_severity[$sev][] = $g;
+                }
+                // Métadonnées d'affichage des onglets.
+                $tabs_meta = [
+                    'critical' => ['label' => 'Issues Critiques', 'badge' => 'bg-danger',  'tab' => 'tab-critical'],
+                    'warning'  => ['label' => 'Avertissements',  'badge' => 'bg-warning text-dark', 'tab' => 'tab-warning'],
+                    'info'     => ['label' => 'Informations',    'badge' => 'bg-info text-dark',    'tab' => 'tab-info'],
+                ];
+                // Onglet actif par défaut : le plus grave qui contient des résultats.
+                $active_tab = 'critical';
+                if ($stats['critical'] === 0) {
+                    $active_tab = $stats['warning'] > 0 ? 'warning' : ($stats['info'] > 0 ? 'info' : 'critical');
+                }
+                ?>
+                <ul class="nav nav-pills nav-fill mb-3" id="severityTabs" role="tablist">
+                    <?php foreach ($tabs_meta as $sev => $meta): ?>
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link <?php echo $active_tab === $sev ? 'active' : ''; ?>"
+                                id="<?php echo $meta['tab']; ?>-tab"
+                                data-bs-toggle="tab"
+                                data-bs-target="#<?php echo $meta['tab']; ?>"
+                                type="button" role="tab"
+                                aria-controls="<?php echo $meta['tab']; ?>"
+                                aria-selected="<?php echo $active_tab === $sev ? 'true' : 'false'; ?>">
+                            <span class="badge <?php echo $meta['badge']; ?>"><?php echo $stats[$sev]; ?></span>
+                            <?php echo htmlspecialchars($meta['label']); ?>
+                        </button>
+                    </li>
+                    <?php endforeach; ?>
+                </ul>
 
 <!-- =====================================================================
 BOUTONS D'EXPORT DES RAPPORTS
@@ -1923,8 +1929,25 @@ LISTE DES FICHIERS DÉTECTÉS
     - Bouton pour afficher le contenu en modal
 ===================================================================== -->
                 <?php $grouped_files = group_by_file($infected_files); ?>
-                <ul class="list-group mb-3">
-                    <?php foreach ($grouped_files as $index => $group):
+                <!-- Zone de contenu des onglets : un panneau par sévérité.
+                     Chaque panneau liste uniquement les fichiers de sa sévérité. -->
+                <div class="tab-content" id="severityTabsContent">
+                <?php foreach ($tabs_meta as $sev => $meta):
+                    $sev_groups = $groups_by_severity[$sev];
+                ?>
+                <div class="tab-pane fade <?php echo $active_tab === $sev ? 'show active' : ''; ?>"
+                     id="<?php echo $meta['tab']; ?>" role="tabpanel"
+                     aria-labelledby="<?php echo $meta['tab']; ?>-tab" tabindex="0">
+
+                    <?php if (empty($sev_groups)): ?>
+                        <div class="alert alert-light border mb-3">
+                            Aucun résultat dans cette catégorie.
+                        </div>
+                    <?php else: ?>
+                    <ul class="list-group mb-3">
+                    <?php foreach ($sev_groups as $gindex => $group):
+                        // ID unique par onglet + index (évite les collisions de modales).
+                        $index = $sev . '-' . $gindex;
                         // Détermine la couleur de la sévérité du groupe
                         $severity = $group['severity'] ?? 'info';
                         $badge_class = 'bg-secondary';
@@ -2016,8 +2039,13 @@ MODAL de détails - Affichage du contexte du fichier
                                 </div>
                             </div>
                         </li>
-                    <?php endforeach; ?>
-                </ul>
+                    <?php endforeach; // foreach des groupes de cette sévérité ?>
+                    </ul>
+                    <?php endif; // fin cas vide ?>
+
+                </div>
+                <?php endforeach; // foreach des onglets (sévérités) ?>
+                </div><!-- /.tab-content -->
             <?php else: ?>
                 <!-- Cas où aucun fichier infecté n'a été trouvé -->
                 <div class="alert alert-success" role="alert">
