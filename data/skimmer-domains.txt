@@ -1,0 +1,45 @@
+# Liste noire de domaines utilisés par des skimmers de carte bancaire (Magecart).
+# ============================================================================
+# Un domaine par ligne. Les lignes vides et les commentaires (#) sont ignorés.
+# Les entrées sont comparées de façon insensible à la casse, par correspondance
+# de sous-chaîne (ex. "jquerycdn.at" détecte aussi "evil.jquerycdn.at").
+#
+# Sources : rapports publics de recherche sécurité (Sansec, Sucuri, publications
+# Magecart). Cette liste est fournie à titre indicatif et n'est PAS exhaustive :
+# les attaquants changent de domaines régulièrement. Mettez-la à jour librement.
+#
+# Format : un domaine par ligne. Ajoutez vos propres domaines en bas de fichier.
+# ============================================================================
+
+# --- Domaines de skimmers historiques connus (Magecart) ---
+jquerycdn.at
+frontstatics.com
+g-analytics.com
+jquery-js.com
+assetsgogle.icu
+tracking-js.com
+google-analyticss.com
+googleanalyttics.com
+livechatinc.org
+cc-liberation.com
+cdn-analytics.xyz
+stat-analytics.xyz
+
+# --- Domaines utilisés dans des campagnes documentées ---
+checkout-js.com
+payments-js.com
+secure-checkout.org
+cart-secure.net
+payment-verification.net
+ssl-verify-payment.com
+card-verify.org
+secure-billing.info
+update-payment.info
+billing-update.org
+
+# --- Hébergements fréquemment abusés (à surveiller, pas forcément malveillants) ---
+# Décommentez si vous voyez du trafic suspect vers ces hébergeurs :
+# 000webhostapp.com
+# weebly.com
+
+# --- Ajoutez ci-dessous vos propres domaines suspects ---

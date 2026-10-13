@@ -23,17 +23,25 @@ la configuration du serveur.
 - **150+ motifs malveillants** (backdoors, web shells, skimmers de carte
   bancaire, code obfusqué, injections…)
 - **Détection de PHP dans les dossiers média** (`img/`, `upload/`, `download/`)
+- **Détection des fichiers PHP déguisés** : double extension (`.php.jpg`),
+  extensions alternatives (`.phtml`, `.php5`, `.phar`) et code PHP caché dans un
+  fichier non-PHP (image, `.txt`, `.css`…)
+- **Détection des fichiers sensibles exposés** : sauvegardes `.sql`, archives,
+  `.env`, `composer.json`, `phpinfo.php`, `adminer.php`, logs…
+- **Liste noire de domaines de skimmers** connus (Magecart), mise à jour via
+  `data/skimmer-domains.txt`
 - **Vérification des permissions** dangereuses (World Writable, 777)
   + correction automatique en un clic (fichiers `0644`, dossiers `0755`)
-- **Audit des en-têtes HTTP de sécurité** (HSTS, CSP, X-Frame-Options…)
+- **Audit des en-têtes HTTP de sécurité** (HSTS, CSP, X-Frame-Options…),
+  avec repli sans `curl` (via `file_get_contents`) pour les hébergements mutualisés
 - **Audit de la configuration PHP** (directives sensibles + extensions requises)
 - **Détection des versions vulnérables** de PrestaShop
 - **Détection des fichiers modifiés récemment** (signal fort de compromission)
 - **Détection de PHPUnit** exposé dans les modules
-- **Analyse du `.htaccess`** racine (redirections, handlers PHP, prepend)
-- **Export des résultats** en CSV et JSON
+- **Analyse du `.htaccess`** racine (redirections, handlers PHP, `php_value`/`php_flag`,
+  `Options +ExecCGI`, `ErrorDocument`…)
+- **Export des résultats** en CSV, JSON et HTML autonome
 - **Scans externes gratuits** (Sucuri SiteCheck, urlscan.io, securityheaders.com)
-- **Scan YARA** (signatures composées de malwares, optionnel)
 - **Interface web responsive** (Bootstrap 5) **et** **mode ligne de commande**
 
 ---
@@ -83,7 +91,6 @@ php scanner.php [options]
 | Option             | Description                                                  |
 |--------------------|--------------------------------------------------------------|
 | `--path=<dossier>` | Racine PrestaShop à analyser (défaut : auto-détection) |
-| `--yara=<fichier>` | Fichier de règles YARA (défaut : `rules/prestashop.yar`)|
 | `--json`           | Sortie au format JSON                                  |
 | `--csv`            | Sortie au format CSV                                         |
 | `--quiet`          | N'affiche que le résumé (pas le détail des fichiers)         |
@@ -102,9 +109,6 @@ php scanner.php --path=/var/www/prestashop --quiet
 # Exports
 php scanner.php --path=/var/www/prestashop --json > rapport.json
 php scanner.php --path=/var/www/prestashop --csv  > rapport.csv
-
-# Scan YARA avec des règles personnalisées
-php scanner.php --path=/var/www/prestashop --yara=/chemin/mes-regles.yar
 ```
 
 ### Codes de sortie (intégration CI / cron)
@@ -130,60 +134,6 @@ ni clé API, pour une seconde opinion :
 
 > Ces scans nécessitent que le site soit **accessible publiquement**. Un domaine
 > local (`localhost`, `127.0.0.1`) ne peut pas être analysé par ces services.
-
----
-
-## Scan YARA (optionnel)
-
-En complément des motifs regex internes, le scanner peut invoquer
-[YARA](https://virustotal.github.io/yara/) pour appliquer des **signatures
-composées** (combinaisons de chaînes, compteurs, contraintes de taille)
-impossibles à exprimer proprement en regex simple. Cela améliore la détection
-des webshells, skimmers et backdoors obfusqués.
-
-### Prérequis
-
-Le binaire `yara` doit être installé sur le serveur et accessible dans le `PATH` :
-
-```bash
-# Debian / Ubuntu
-sudo apt install yara
-
-# macOS (Homebrew)
-brew install yara
-```
-
-Si YARA est absent, le scan YARA est **automatiquement ignoré** (sans erreur ni
-blocage) et le reste du scan fonctionne normalement.
-
-### Règles par défaut
-
-Le fichier `rules/prestashop.yar` fournit un jeu de règles couvrant :
-
-- webshells génériques (exécution de code depuis une entrée utilisateur) ;
-- obfuscation (`eval` + `base64_decode`/`gzinflate`/`str_rot13`) ;
-- payloads cachés après `__halt_compiler()` ;
-- familles connues (WSO, panneaux webshell) ;
-- skimmers de carte bancaire (capture + exfiltration réseau) ;
-- backdoors d'exécution de code distant et reverse shells ;
-- mineurs de cryptomonnaie ;
-- `.htaccess` malveillants.
-
-### Utilisation
-
-Le scan YARA est automatique si le binaire et les règles sont présents. Pour
-utiliser vos propres règles :
-
-```bash
-php scanner.php --path=/var/www/prestashop --yara=/chemin/mes-regles.yar
-```
-
-Les détections YARA apparaissent dans le rapport avec le préfixe `YARA :`
-(sévérité `critical`).
-
-> Les fichiers de l'outillage du scanner (le script lui-même et les fichiers de
-> règles `.yar`) sont automatiquement exclus du scan YARA pour éviter les faux
-> positifs.
 
 ---
 

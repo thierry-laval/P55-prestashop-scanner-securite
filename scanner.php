@@ -50,7 +50,6 @@ Usage : php scanner.php [options]
 
 Options :
   --path=<dossier>   Racine PrestaShop à analyser (défaut : auto-détection)
-  --yara=<fichier>   Fichier de règles YARA (défaut : rules/prestashop.yar)
   --json             Sortie au format JSON
   --csv              Sortie au format CSV
   --quiet            N'affiche que le résumé (pas le détail des fichiers)
@@ -62,7 +61,6 @@ Exemples :
   php scanner.php --path=/var/www/prestashop --quiet
   php scanner.php --json > rapport.json
   php scanner.php --csv  > rapport.csv
-  php scanner.php --yara=/chemin/mes-regles.yar
 
 TXT);
     exit(0);
@@ -846,6 +844,15 @@ check_install_folder($infected_files, $root_path);
 // Appel de la vérification des permissions sur les fichiers sensibles
 check_sensitive_permissions($infected_files, $root_path);
 
+// Appel de la détection des fichiers PHP déguisés (extensions trompeuses)
+check_suspicious_extensions($root_path, $infected_files);
+
+// Appel de la détection des fichiers sensibles exposés (backups, .env, phpinfo...)
+check_exposed_sensitive_files($root_path, $infected_files);
+
+// Appel de la détection des domaines de skimmers connus (liste noire externe)
+check_skimmer_domains($root_path, $infected_files, __DIR__ . '/data/skimmer-domains.txt');
+
 // Appel de la vérification des headers HTTP de sécurité
 $homepageUrl = $scheme . '://' . $host . '/';
 $header_issues = [];
@@ -1079,6 +1086,277 @@ function fix_detected_permissions(&$infected_files) {
 }
 
 /**
+ * FONCTION : check_suspicious_extensions()
+ *
+ * OBJECTIF :
+ * Détecte les fichiers PHP déguisés, un vecteur de backdoor très courant :
+ * - double extension trompeuse (.php.jpg, .php.png, .php.txt...) ;
+ * - extensions PHP alternatives (.php3, .php4, .php5, .php7, .phtml, .phar, .pht) ;
+ * - fichiers à l'extension anodine (jpg, png, gif, txt, css, ico...) dont le
+ *   CONTENU commence réellement par du code PHP ("<?php" ou "<?=").
+ *
+ * Un fichier image/text qui contient du PHP exécutable est hautement suspect :
+ * c'est la signature classique d'un webshell uploadé via un formulaire.
+ *
+ * PARAMÈTRES :
+ * @param string $root_path       Racine PrestaShop à analyser
+ * @param array  &$infected_files Tableau des résultats (modifié par référence)
+ *
+ * @return void
+ */
+function check_suspicious_extensions($root_path, &$infected_files) {
+    if (!is_dir($root_path)) return;
+
+    // Extensions PHP alternatives qui, selon la config Apache/PHP, peuvent
+    // être exécutées comme du PHP.
+    $php_like_ext = ['php3', 'php4', 'php5', 'php7', 'php8', 'phtml', 'phar', 'pht', 'phps'];
+
+    // Extensions "anodines" qui ne devraient JAMAIS contenir de code PHP.
+    $benign_ext  = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg', 'ico',
+                    'txt', 'css', 'js', 'json', 'xml', 'html', 'htm', 'md', 'log', 'pdf'];
+
+    $iterator = new RecursiveIteratorIterator(
+        new RecursiveDirectoryIterator($root_path, FilesystemIterator::SKIP_DOTS),
+        RecursiveIteratorIterator::LEAVES_ONLY
+    );
+
+    foreach ($iterator as $fileInfo) {
+        if (!$fileInfo->isFile()) continue;
+
+        $path = $fileInfo->getPathname();
+        // Ignore les dossiers de cache/versioning (bruit).
+        if (preg_match('~/(var/cache|app/cache|\.git|node_modules)/~', $path)) continue;
+
+        $name = $fileInfo->getFilename();
+        $ext  = strtolower($fileInfo->getExtension());
+        $size = $fileInfo->getSize();
+
+        // 1) Extensions PHP alternatives (.phtml, .php5, .phar...).
+        if (in_array($ext, $php_like_ext, true)) {
+            $infected_files[] = [
+                'file'       => $path,
+                'line'       => null,
+                'pattern'    => 'EXTENSION PHP ALTERNATIVE : .' . $ext,
+                'context'    => [
+                    'Ce fichier utilise une extension PHP alternative (.'. $ext .').',
+                    "Ces extensions peuvent être exécutées comme du PHP selon la configuration du serveur.",
+                    'Vérifiez son contenu : c\'est un vecteur de backdoor fréquent.',
+                ],
+                'start_line' => 1,
+                'mtime'      => @filemtime($path),
+                'severity'   => 'critical',
+                'md5'        => @md5_file($path) ?: 'N/A',
+            ];
+            continue;
+        }
+
+        // 2) Double extension trompeuse : nom.php.<autre>
+        if (preg_match('/\.php\.[a-z0-9]+$/i', $name)) {
+            $infected_files[] = [
+                'file'       => $path,
+                'line'       => null,
+                'pattern'    => 'DOUBLE EXTENSION SUSPECTE',
+                'context'    => [
+                    'Ce fichier porte une double extension trompeuse (ex. .php.jpg).',
+                    "Un nom de fichier comme 'image.php.jpg' peut être interprété comme du PHP par certains serveurs.",
+                    'Vérifiez son contenu et sa provenance.',
+                ],
+                'start_line' => 1,
+                'mtime'      => @filemtime($path),
+                'severity'   => 'critical',
+                'md5'        => @md5_file($path) ?: 'N/A',
+            ];
+            continue;
+        }
+
+        // 3) Contenu PHP dans un fichier à extension anodine.
+        // On lit uniquement les premiers octets (pas tout le fichier) : léger.
+        if (in_array($ext, $benign_ext, true) && $size > 0 && $size < (2 * 1024 * 1024)) {
+            $fh = @fopen($path, 'rb');
+            if ($fh === false) continue;
+            $head = fread($fh, 512);
+            fclose($fh);
+
+            // Détecte "<?php" ou "<?=" au tout début (tolère espaces/UTF-8 BOM).
+            if (preg_match('/^(?:\xEF\xBB\xBF)?\s*<\?(?:php|=)/i', (string)$head)) {
+                $infected_files[] = [
+                    'file'       => $path,
+                    'line'       => 1,
+                    'pattern'    => 'CODE PHP DANS UN FICHIER NON-PHP',
+                    'context'    => [
+                        'Ce fichier a une extension non-PHP (.' . $ext . ') mais son contenu commence par du code PHP.',
+                        'C\'est la signature typique d\'un webshell déguisé en image ou en fichier texte.',
+                        'À vérifier impérativement.',
+                    ],
+                    'start_line' => 1,
+                    'mtime'      => @filemtime($path),
+                    'severity'   => 'critical',
+                    'md5'        => @md5_file($path) ?: 'N/A',
+                ];
+            }
+        }
+    }
+}
+
+/**
+ * FONCTION : check_exposed_sensitive_files()
+ *
+ * OBJECTIF :
+ * Détecte la présence de fichiers sensibles qui ne devraient JAMAIS être
+ * accessibles publiquement sur un site en production : sauvegardes de base
+ * de données, archives, fichiers de configuration d'environnement, scripts
+ * d'information PHP, etc.
+ *
+ * Ces fichiers sont des fuites classiques : une sauvegarde .sql téléchargeable
+ * expose toute la base (clients, commandes, mots de passe), un .env expose les
+ * identifiants, un phpinfo.php révèle la configuration du serveur.
+ *
+ * PARAMÈTRES :
+ * @param string $root_path       Racine PrestaShop à analyser
+ * @param array  &$infected_files Tableau des résultats (modifié par référence)
+ *
+ * @return void
+ */
+function check_exposed_sensitive_files($root_path, &$infected_files) {
+    if (!is_dir($root_path)) return;
+
+    // Fichiers/dossiers sensibles recherchés à la RACINE et dans les 2 premiers
+    // niveaux (les zones réellement exposées publiquement).
+    $sensitive = [
+        // Sauvegardes de base de données / dumps
+        '/\.sql(\.gz|\.zip|\.bz2)?$/i'          => ['critical', 'Sauvegarde de base de données exposée'],
+        '/\.(bak|old|orig|save|swp|copy)$/i'   => ['critical', 'Fichier de sauvegarde/backup exposé'],
+        // Archives (souvent des backups de site complet)
+        '/\.(zip|tar|tar\.gz|tgz|gz|rar|7z)$/i' => ['warning', 'Archive exposée (backup de site ?)'],
+        // Configuration d'environnement
+        '/^\.env(\.|$)/i'                       => ['critical', 'Fichier .env exposé (identifiants/secrets)'],
+        '/^\.git(\/|$)/i'                      => ['critical', 'Dépôt .git exposé (code source récupérable)'],
+        // Fichiers de dépendances (révèlent les versions vulnérables)
+        '/^composer\.(json|lock)$/i'            => ['warning', 'composer.json/lock exposé (versions des dépendances)'],
+        // Scripts d'information PHP (fuite de configuration)
+        '/^(phpinfo|info|test|php_info)\.php$/i' => ['critical', 'Script phpinfo/info exposé (fuite de configuration)'],
+        // Outils d'administration de base de données
+        '/^(adminer|adminer\.php|db\.php|mysql\.php|sql\.php)$/i' => ['critical', 'Outil d\'admin BDD exposé (adminer/… )'],
+        // Fichiers de logs à la racine
+        '/^(error|debug|access)\.log$/i'        => ['warning', 'Fichier de log exposé'],
+    ];
+
+    // Racine + un niveau de profondeur (dossiers directement accessibles en HTTP).
+    $scan_dirs = [$root_path];
+    foreach (scandir($root_path) as $d) {
+        if ($d === '.' || $d === '..') continue;
+        $p = $root_path . '/' . $d;
+        if (is_dir($p) && !in_array($d, ['var', 'app', 'vendor', 'node_modules', '.git'], true)) {
+            $scan_dirs[] = $p;
+        }
+    }
+
+    foreach ($scan_dirs as $dir) {
+        foreach (scandir($dir) as $entry) {
+            if ($entry === '.' || $entry === '..') continue;
+            $path = $dir . '/' . $entry;
+            if (!is_file($path)) continue;
+
+            foreach ($sensitive as $regex => $info) {
+                if (preg_match($regex, $entry)) {
+                    [$sev, $label] = $info;
+                    $infected_files[] = [
+                        'file'       => $path,
+                        'line'       => null,
+                        'pattern'    => 'FICHIER SENSIBLE EXPOSÉ : ' . $label,
+                        'context'    => [
+                            'Ce fichier ne devrait pas être présent dans une zone accessible publiquement.',
+                            'Recommandation : supprimez-le du serveur ou déplacez-le hors de la racine web.',
+                        ],
+                        'start_line' => 1,
+                        'mtime'      => @filemtime($path),
+                        'severity'   => $sev,
+                        'md5'        => @md5_file($path) ?: 'N/A',
+                    ];
+                    break; // un seul signalement par fichier
+                }
+            }
+        }
+    }
+}
+
+/**
+ * FONCTION : check_skimmer_domains()
+ *
+ * OBJECTIF :
+ * Détecte la présence de domaines connus de skimmers de carte bancaire
+ * (Magecart) dans les fichiers du site. La liste des domaines est chargée
+ * depuis data/skimmer-domains.txt (mise à jour possible sans toucher au code).
+ *
+ * Un skimmer injecte souvent un <script src="https://domaine-skimmer/...">
+ * ou un appel réseau vers un domaine d'exfiltration. Retrouver un de ces
+ * domaines dans le code est un signal fort de compromission.
+ *
+ * PARAMÈTRES :
+ * @param string $root_path       Racine PrestaShop à analyser
+ * @param array  &$infected_files Tableau des résultats (modifié par référence)
+ * @param string $list_path       Chemin du fichier de liste noire
+ *
+ * @return void
+ */
+function check_skimmer_domains($root_path, &$infected_files, $list_path) {
+    if (!is_dir($root_path) || !is_file($list_path) || !is_readable($list_path)) return;
+
+    // Chargement de la liste noire (on ignore commentaires et lignes vides).
+    $domains = [];
+    foreach (file($list_path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
+        $line = trim($line);
+        if ($line === '' || $line[0] === '#') continue;
+        $domains[] = strtolower($line);
+    }
+    if (empty($domains)) return;
+
+    // Extensions susceptibles de contenir une injection de skimmer.
+    $exts = ['js', 'php', 'tpl', 'html', 'htm', 'xml', 'css'];
+
+    $iterator = new RecursiveIteratorIterator(
+        new RecursiveDirectoryIterator($root_path, FilesystemIterator::SKIP_DOTS),
+        RecursiveIteratorIterator::LEAVES_ONLY
+    );
+
+    foreach ($iterator as $fileInfo) {
+        if (!$fileInfo->isFile()) continue;
+        if (!in_array(strtolower($fileInfo->getExtension()), $exts, true)) continue;
+
+        $path = $fileInfo->getPathname();
+        if (preg_match('~/(var/cache|app/cache|\.git|node_modules)/~', $path)) continue;
+
+        // Limite de taille : inutile de charger des bundles énormes.
+        $size = $fileInfo->getSize();
+        if ($size === 0 || $size > (3 * 1024 * 1024)) continue;
+
+        $content = @file_get_contents($path);
+        if ($content === false) continue;
+        $content_lc = strtolower($content);
+
+        foreach ($domains as $domain) {
+            if (strpos($content_lc, $domain) !== false) {
+                $infected_files[] = [
+                    'file'       => $path,
+                    'line'       => null,
+                    'pattern'    => 'DOMAINE SKIMMER CONNU : ' . $domain,
+                    'context'    => [
+                        'Ce fichier contient une référence à un domaine associé à des skimmers de carte bancaire.',
+                        'Vérifiez immédiatement ce fichier : il peut s\'agir d\'une injection malveillante.',
+                        'Si la référence est légitime (rare), ajoutez ce fichier à la liste blanche.',
+                    ],
+                    'start_line' => 1,
+                    'mtime'      => @filemtime($path),
+                    'severity'   => 'critical',
+                    'md5'        => @md5_file($path) ?: 'N/A',
+                ];
+                break; // un seul signalement par fichier
+            }
+        }
+    }
+}
+
+/**
  * FONCTION : check_http_security_headers()
  * 
  * OBJECTIF :
@@ -1100,32 +1378,108 @@ function fix_detected_permissions(&$infected_files) {
  * - Permissions-Policy : contrôle les fonctionnalités du navigateur
  * - X-XSS-Protection : protection XSS (navigateurs légers)
  */
-function check_http_security_headers($url, &$header_issues) {
-    if (empty($url) || !function_exists('curl_init')) return;
-
-    $ch = curl_init();
-    curl_setopt($ch, CURLOPT_URL, $url);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_HEADER, true);
-    curl_setopt($ch, CURLOPT_NOBODY, true);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false); 
-    curl_setopt($ch, CURLOPT_TIMEOUT, 5);
-    
-    $response = curl_exec($ch);
-    
-    if ($response === false) {
-        return;
+/**
+ * FONCTION : http_headers_from_stream()
+ *
+ * OBJECTIF :
+ * Récupère les en-têtes de la DERNIÈRE réponse HTTP effectuée via le wrapper
+ * de flux (file_get_contents), en restant compatible avec toutes les versions
+ * de PHP.
+ *
+ * Depuis PHP 8.4, la variable locale $http_response_header est dépréciée au
+ * profit de http_get_last_response_headers(). On privilégie la fonction moderne
+ * quand elle existe ; l'accès à l'ancienne variable est isolé dans une portée
+ * séparée (cette fonction) pour ne pas déclencher la dépréciation ailleurs.
+ *
+ * @return array|null Liste d'en-têtes, ou null si indisponible.
+ */
+function http_headers_from_stream() {
+    if (function_exists('http_get_last_response_headers')) {
+        $h = http_get_last_response_headers();
+        return is_array($h) ? $h : null;
     }
+    // PHP < 8.4 : variable spéciale peuplée par file_get_contents().
+    // On la lit via $GLOBALS pour éviter la dépréciation sur PHP récent
+    // (ce bloc n'est atteint que si la fonction moderne n'existe pas).
+    if (isset($GLOBALS['http_response_header']) && is_array($GLOBALS['http_response_header'])) {
+        return $GLOBALS['http_response_header'];
+    }
+    return null;
+}
 
-    $header_size = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
-    $header_text = substr($response, 0, $header_size);
+function check_http_security_headers($url, &$header_issues) {
+    if (empty($url)) return;
 
     $headers = [];
-    foreach (explode("\r\n", $header_text) as $line) {
-        $parts = explode(':', $line, 2);
-        if (count($parts) == 2) {
-            $headers[strtolower(trim($parts[0]))] = trim($parts[1]);
+
+    // Méthode 1 : cURL (si disponible et non désactivé).
+    if (function_exists('curl_init')) {
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, $url);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_HEADER, true);
+        curl_setopt($ch, CURLOPT_NOBODY, true);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 5);
+
+        $response = curl_exec($ch);
+
+        if ($response !== false) {
+            $header_size = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
+            $header_text = substr($response, 0, $header_size);
+            foreach (explode("\r\n", $header_text) as $line) {
+                $parts = explode(':', $line, 2);
+                if (count($parts) == 2) {
+                    $headers[strtolower(trim($parts[0]))] = trim($parts[1]);
+                }
+            }
         }
+        // curl_close() est sans effet depuis PHP 8.0 et déprécié depuis 8.5 :
+        // on ne l'appelle que sur les versions où il est encore utile (< 8.0).
+        if (PHP_VERSION_ID < 80000) {
+            curl_close($ch);
+        }
+    }
+
+    // Méthode 2 (fallback) : PHP natif via file_get_contents().
+    // Sur de nombreux hébergements mutualisés, curl est désactivé (disable_functions)
+    // ou l'extension curl absente. Dans ce cas, $http_response_header est peuplé
+    // automatiquement par PHP après un appel file_get_contents() en HTTP.
+    // Cela rend l'audit des en-têtes fonctionnel même sans curl.
+    if (empty($headers) && ini_get('allow_url_fopen')) {
+        $ctx = stream_context_create([
+            'http' => [
+                'method'        => 'HEAD',
+                'timeout'       => 5,
+                'ignore_errors' => true,
+                'header'        => "User-Agent: PrestaShop-Security-Scanner\r\n",
+            ],
+            'ssl' => [
+                'verify_peer'      => false,
+                'verify_peer_name' => false,
+            ],
+        ]);
+        // Le @ masque l'avertissement si le serveur ne répond pas ; on exploite
+        // les en-têtes de réponse même en cas d'erreur HTTP (4xx/5xx).
+        // Note : la variable locale $http_response_header est dépréciée depuis
+        // PHP 8.4. On récupère les en-têtes via un helper qui n'y fait appel que
+        // sur les versions anciennes (voir http_headers_from_stream() plus bas),
+        // afin de ne jamais déclencher la dépréciation sur PHP récent.
+        @file_get_contents($url, false, $ctx);
+        $resp_headers = http_headers_from_stream();
+        if (!empty($resp_headers) && is_array($resp_headers)) {
+            foreach ($resp_headers as $line) {
+                $parts = explode(':', $line, 2);
+                if (count($parts) == 2) {
+                    $headers[strtolower(trim($parts[0]))] = trim($parts[1]);
+                }
+            }
+        }
+    }
+
+    // Si aucune méthode n'a pu récupérer d'en-tête, on s'arrête silencieusement.
+    if (empty($headers)) {
+        return;
     }
 
     // Liste des headers à vérifier avec règles qualitatives
@@ -1221,6 +1575,18 @@ function scan_root_htaccess($root_path, &$infected_files) {
         'htaccess_redirect_malware' => '/RewriteRule\s+^.*$\s+https?:\/\/[^\s]+\s+[LR]/i',
         'htaccess_php_execution' => '/(SetHandler|AddHandler|AddType)\s+application\/x-httpd-php/i',
         'htaccess_php_value_prepend' => '/php_value\s+(?:auto_prepend_file|auto_append_file)/i',
+        // Nouvelles vérifications demandées :
+        // - php_value/php_flag : peuvent réactiver des fonctions dangereuses
+        //   (allow_url_include, display_errors...) ou charger du code (auto_prepend).
+        'htaccess_php_value_suspicious' => '/php_(?:value|flag)\s+(?:allow_url_include|allow_url_fopen|auto_prepend_file|auto_append_file|display_errors|engine)\b/i',
+        // - Options +ExecCGI : autorise l'exécution de scripts CGI dans un dossier,
+        //   vecteur classique pour exécuter un script déposé.
+        'htaccess_options_execcgi' => '/Options\s+.*\+ExecCGI/i',
+        // - ErrorDocument pointant vers un fichier local : backdoor fréquente
+        //   (le 404 déclenche l'exécution d'un script malveillant).
+        'htaccess_errordocument_local' => '/ErrorDocument\s+\d{3}\s+\/(?!https?:)[^\s]+/i',
+        // - Fichiers/dossiers ajoutés à l'exécution PHP via <FilesMatch> ou <Directory>.
+        'htaccess_filesmatch_php' => '/<FilesMatch[^>]*>\s*.*?x-httpd-php/i',
     ];
 
     $lines = explode("\n", $content);
@@ -1466,23 +1832,6 @@ check_recently_modified_files($root_path, $infected_files, 7);
 check_prestashop_vulnerabilities($root_path, $prestashop_version, $infected_files);
 
 // ============================================================================
-// SCAN YARA (optionnel) - signatures composées
-// ============================================================================
-// Si le binaire `yara` est présent et qu'un fichier de règles est disponible,
-// on lance un scan YARA en complément des motifs regex internes.
-// Chemin des règles : --yara=<fichier> en CLI, sinon rules/prestashop.yar
-// (à côté du script). Le scan est silencieusement ignoré si YARA est absent.
-$yara_rules_path = __DIR__ . '/rules/prestashop.yar';
-if (PHP_SAPI === 'cli' && !empty($argv)) {
-    foreach ($argv as $arg) {
-        if (preg_match('/^--yara=(.+)$/', $arg, $m)) {
-            $yara_rules_path = $m[1];
-        }
-    }
-}
-$yara_report = scan_with_yara($root_path, $infected_files, $yara_rules_path);
-
-// ============================================================================
 // TRI DES RÉSULTATS - Ordre d'affichage
 // ============================================================================
 // Tri multi-critères :
@@ -1651,15 +2000,6 @@ TXT);
         echo "\n";
     }
 
-    // Résumé du scan YARA
-    if (!empty($yara_report['available'])) {
-        echo "  Scan YARA : " . $yara_report['matches'] . " détection(s)";
-        if (!empty($yara_report['version'])) echo " (moteur " . $yara_report['version'] . ")";
-        echo "\n\n";
-    } elseif (!empty($yara_report['error'])) {
-        echo "  Scan YARA : ignoré (" . $yara_report['error'] . ")\n\n";
-    }
-
     // Code de sortie : 2 si problèmes critiques, 1 si avertissements, 0 sinon.
     // Permet l'intégration dans des scripts / CI (ex. cron, GitLab CI).
     if ($stats['critical'] > 0)      exit(2);
@@ -1757,6 +2097,111 @@ if (isset($_GET['export_json'])) {
 }
 
 // ============================================================================
+// EXPORT DES RÉSULTATS - FORMAT HTML AUTONOME
+// ============================================================================
+// Génère un rapport HTML autonome (CSS intégré, aucune dépendance externe)
+// téléchargeable et archivable. Pratique pour conserver une trace d'un audit
+// ou le transmettre à un prestataire, sans avoir besoin du scanner.
+
+if (isset($_GET['export_html'])) {
+    header('Content-Type: text/html; charset=utf-8');
+    header('Content-Disposition: attachment; filename=scan_report.html');
+
+    $stats_h  = get_statistics($infected_files);
+    $e        = function ($s) { return htmlspecialchars((string) $s, ENT_QUOTES, 'UTF-8'); };
+    $sev_col  = ['critical' => '#dc3545', 'warning' => '#ffc107', 'info' => '#0dcaf0'];
+    ?>
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<title>Rapport de scan de sécurité PrestaShop</title>
+<style>
+    body { font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 2rem; color: #222; }
+    h1 { font-size: 1.5rem; }
+    .meta { background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 6px; padding: 1rem; margin-bottom: 1.5rem; }
+    .meta li { margin: 2px 0; }
+    .cards { display: flex; gap: 1rem; margin-bottom: 1.5rem; flex-wrap: wrap; }
+    .card { flex: 1; min-width: 140px; border-radius: 6px; padding: 1rem; text-align: center; color: #fff; }
+    .c-crit { background: #dc3545; } .c-warn { background: #ffc107; color: #222; } .c-info { background: #0dcaf0; color: #222; }
+    .card .n { font-size: 1.8rem; font-weight: bold; display: block; }
+    table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
+    th, td { border: 1px solid #dee2e6; padding: 6px 8px; text-align: left; vertical-align: top; }
+    th { background: #f1f3f5; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; color: #fff; font-size: 0.75rem; font-weight: bold; }
+    .b-critical { background: #dc3545; } .b-warning { background: #ffc107; color: #222; } .b-info { background: #0dcaf0; color: #222; }
+    code { background: #f1f3f5; padding: 1px 4px; border-radius: 3px; }
+    .footer { margin-top: 2rem; font-size: 0.8rem; color: #6c757d; }
+</style>
+</head>
+<body>
+<h1>🛡️ Rapport de scan de sécurité PrestaShop</h1>
+
+<div class="meta">
+<ul>
+    <li><strong>Date du scan :</strong> <?php echo $e(date('d/m/Y H:i:s')); ?></li>
+    <li><strong>Version du script :</strong> <?php echo $e($version); ?></li>
+    <li><strong>Version PrestaShop :</strong> <?php echo $e($prestashop_version); ?></li>
+    <li><strong>Version PHP :</strong> <?php echo $e($php_version); ?></li>
+    <li><strong>Racine analysée :</strong> <code><?php echo $e($root_path); ?></code></li>
+    <li><strong>Fichiers analysés :</strong> <?php echo (int) $total_php_files; ?></li>
+</ul>
+</div>
+
+<div class="cards">
+    <div class="card c-crit"><span class="n"><?php echo $stats_h['critical']; ?></span>Critiques</div>
+    <div class="card c-warn"><span class="n"><?php echo $stats_h['warning']; ?></span>Avertissements</div>
+    <div class="card c-info"><span class="n"><?php echo $stats_h['info']; ?></span>Informations</div>
+</div>
+
+<?php if (empty($infected_files)): ?>
+    <p style="color: #198754; font-weight: bold;">✅ Aucun fichier suspect détecté.</p>
+<?php else: ?>
+<table>
+    <thead>
+        <tr><th>Criticité</th><th>Fichier</th><th>Motif</th><th>Ligne</th><th>Dernière modif.</th><th>MD5</th></tr>
+    </thead>
+    <tbody>
+    <?php foreach ($infected_files as $it):
+        $sev = $it['severity'] ?? 'info';
+    ?>
+        <tr>
+            <td><span class="badge b-<?php echo $e($sev); ?>"><?php echo strtoupper($e($sev)); ?></span></td>
+            <td><code><?php echo $e($it['file']); ?></code></td>
+            <td><?php echo $e($it['pattern']); ?></td>
+            <td><?php echo !empty($it['line']) ? (int) $it['line'] : '—'; ?></td>
+            <td><?php echo !empty($it['mtime']) ? $e(date('d/m/Y H:i', $it['mtime'])) : '—'; ?></td>
+            <td><code><?php echo $e($it['md5'] ?? 'N/A'); ?></code></td>
+        </tr>
+    <?php endforeach; ?>
+    </tbody>
+</table>
+<?php endif; ?>
+
+<?php if (!empty($header_issues)): ?>
+<h2 style="font-size:1.1rem; margin-top:1.5rem;">En-têtes HTTP de sécurité manquants</h2>
+<table>
+    <thead><tr><th>En-tête</th><th>Statut</th><th>Détails</th></tr></thead>
+    <tbody>
+    <?php foreach ($header_issues as $h): ?>
+        <tr><td><?php echo $e($h['header']); ?></td><td><?php echo $e($h['status']); ?></td><td><?php echo $e($h['details']); ?></td></tr>
+    <?php endforeach; ?>
+    </tbody>
+</table>
+<?php endif; ?>
+
+<p class="footer">
+    Rapport généré par le Scanner de sécurité PrestaShop v<?php echo $e($version); ?> —
+    par <a href="https://thierrylaval.dev">thierrylaval.dev</a>.<br>
+    Rien ne garantit qu'un scan détecte 100% des menaces : vérifiez manuellement les points signalés.
+</p>
+</body>
+</html>
+    <?php
+    exit();
+}
+
+// ============================================================================
 // REGROUPEMENT DES RÉSULTATS PAR FICHIER
 // ============================================================================
 // Le scan peut produire plusieurs entrées pour un même fichier (une par motif
@@ -1786,154 +2231,6 @@ function group_by_file($infected_files) {
     return array_values($groups);
 }
 
-/**
- * FONCTION : scan_with_yara()
- *
- * OBJECTIF :
- * Complète le scan interne (regex) par un scan YARA, si le binaire `yara` est
- * disponible sur le serveur. YARA apporte des conditions composées (combinaisons
- * de chaînes, compteurs, contraintes de taille) que des regex simples ne peuvent
- * pas exprimer proprement, ce qui améliore la détection de webshells, skimmers
- * et backdoors obfusqués.
- *
- * Le binaire est invoqué via proc_open() avec un tableau d'arguments (PAS via
- * shell), afin d'éviter toute injection de commande. Les chemins de règles et
- * de cibles sont passés tels quels, sans passer par le shell.
- *
- * PARAMÈTRES :
- * @param string $root_path        Racine PrestaShop à analyser
- * @param array  &$infected_files  Tableau de résultats (modifié par référence)
- * @param string $rules_path       Chemin du fichier de règles YARA
- *
- * @return array ['available' => bool, 'scanned' => int, 'matches' => int, 'error' => ?string]
- *
- * LOGIQUE :
- * 1. Vérifie que la fonction proc_open est disponible et que le binaire yara existe
- * 2. Lance `yara <rules> <root_path> -r` (scan récursif)
- * 3. Parse la sortie (une ligne par match : "NomDeRegle CheminFichier")
- * 4. Ajoute chaque match comme détection critique
- */
-function scan_with_yara($root_path, &$infected_files, $rules_path) {
-    $result = ['available' => false, 'scanned' => 0, 'matches' => 0, 'error' => null];
-
-    // proc_open peut être désactivé (disable_functions) sur certains hébergements.
-    if (!function_exists('proc_open') || !function_exists('proc_close')) {
-        $result['error'] = 'proc_open indisponible';
-        return $result;
-    }
-
-    // Vérifie la présence du binaire `yara` (et sa version) sans passer par le shell.
-    $yara_bin = null;
-    foreach (['yara'] as $candidate) {
-        $probe = @proc_open(
-            [$candidate, '--version'],
-            [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
-            $pipes
-        );
-        if (is_resource($probe)) {
-            $out = stream_get_contents($pipes[1]);
-            fclose($pipes[1]); fclose($pipes[2]);
-            $code = proc_close($probe);
-            if ($code === 0 && trim($out) !== '') {
-                $yara_bin = $candidate;
-                $result['version'] = trim($out);
-                break;
-            }
-        }
-    }
-    if ($yara_bin === null) {
-        $result['error'] = 'binaire yara introuvable';
-        return $result;
-    }
-
-    // Vérifie que le fichier de règles existe et est lisible.
-    if (!is_file($rules_path) || !is_readable($rules_path)) {
-        $result['error'] = 'règles YARA introuvables : ' . $rules_path;
-        return $result;
-    }
-    if (!is_dir($root_path)) {
-        $result['error'] = 'racine introuvable : ' . $root_path;
-        return $result;
-    }
-
-    $result['available'] = true;
-
-    // Construction de la commande sous forme de TABLEAU d'arguments :
-    // aucune interpolation shell, donc aucun risque d'injection.
-    //   yara -r -w <rules> <root_path>
-    //   -r : récursif ; -w : masque les warnings de compilation.
-    $cmd = [$yara_bin, '-r', '-w', $rules_path, $root_path];
-
-    $descriptors = [1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
-    $process = @proc_open($cmd, $descriptors, $pipes);
-    if (!is_resource($process)) {
-        $result['error'] = 'échec du lancement de yara';
-        return $result;
-    }
-
-    $stdout = stream_get_contents($pipes[1]);
-    $stderr = stream_get_contents($pipes[2]);
-    fclose($pipes[1]);
-    fclose($pipes[2]);
-    $exit_code = proc_close($process);
-
-    // yara renvoie 0 (aucun match), 1 (match(s) trouvé(s)) ou >1 (erreur).
-    if ($exit_code > 1) {
-        $result['error'] = 'yara a retourné un code ' . $exit_code . ($stderr ? ' : ' . trim($stderr) : '');
-        return $result;
-    }
-
-    // Parsing de la sortie : chaque ligne = "NomDeRegle CheminDuFichier".
-    //
-    // IMPORTANT : on ignore les matches sur l'outillage du scanner lui-même.
-    // Le fichier de règles YARA (.yar) et le script scanner.php contiennent
-    // forcément les mots-clés des règles (eval, $_POST, noms de règles...) et
-    // se détecteraient eux-mêmes, polluant le rapport de faux positifs. Ces
-    // fichiers ne font pas partie de l'application PrestaShop analysée.
-    $self_real  = realpath(__FILE__) ?: __FILE__;
-    $rules_real = realpath($rules_path) ?: $rules_path;
-
-    $lines = preg_split('/\R/', trim((string)$stdout));
-    foreach ($lines as $line) {
-        $line = trim($line);
-        if ($line === '') continue;
-
-        // Le chemin peut contenir des espaces : on sépare sur le PREMIER espace.
-        $sep = strpos($line, ' ');
-        if ($sep === false) continue;
-        $rule_name = substr($line, 0, $sep);
-        $file_path = trim(substr($line, $sep + 1));
-        if ($file_path === '') continue;
-
-        // Exclusion de l'outillage du scanner (script + règles YARA).
-        $file_real = realpath($file_path) ?: $file_path;
-        if ($file_real === $self_real || $file_real === $rules_real) {
-            continue;
-        }
-        // Exclusion de tout fichier de règles YARA (.yar / .yara).
-        if (preg_match('/\.ya?ra?$/i', $file_path)) {
-            continue;
-        }
-
-        $result['matches']++;
-        $infected_files[] = [
-            'file'       => $file_path,
-            'line'       => null,
-            'pattern'    => 'YARA : ' . $rule_name,
-            'context'    => [
-                'Règle YARA déclenchée : ' . $rule_name,
-                'Détection basée sur une signature composée (YARA), complémentaire des motifs internes.',
-                'Vérifiez ce fichier manuellement : il correspond à un profil malveillant connu.',
-            ],
-            'start_line' => 1,
-            'mtime'      => @filemtime($file_path),
-            'severity'   => 'critical',
-            'md5'        => (is_file($file_path) ? @md5_file($file_path) : 'N/A') ?: 'N/A',
-        ];
-    }
-
-    return $result;
-}
 
 ?>
 
@@ -2093,6 +2390,7 @@ BOUTONS D'EXPORT DES RAPPORTS
                 <div class="mb-3">
                     <a href="?export_csv=1" class="btn btn-warning">📥 Télécharger le rapport CSV</a>
                     <a href="?export_json=1" class="btn btn-info">📥 Télécharger le rapport JSON</a>
+                    <a href="?export_html=1" class="btn btn-secondary">📥 Télécharger le rapport HTML</a>
                     <?php
                     // Bouton de correction des permissions : affiché uniquement si
                     // le scan a détecté au moins un problème de permissions.
@@ -2449,45 +2747,6 @@ MODAL de détails - Affichage du contexte du fichier
     </div>
     <?php endif; ?>
 
-    <!-- =====================================================================
-        SECTION SCAN YARA - Signatures composées
-        =====================================================================
-        Affiche le statut du scan YARA (moteur de détection par signatures).
-        Si le binaire `yara` est absent, on l'indique sans bloquer le rapport.
-    ===================================================================== -->
-    <div class="card mt-4">
-        <div class="card-header <?php echo !empty($yara_report['available']) ? 'bg-secondary text-white' : 'bg-light'; ?>">
-            🧬 Scan YARA (signatures de malwares)
-        </div>
-        <div class="card-body">
-            <?php if (!empty($yara_report['available'])): ?>
-                <p class="mb-1">
-                    <strong>Moteur YARA actif</strong>
-                    <?php if (!empty($yara_report['version'])): ?>
-                        <span class="text-muted">(version <?php echo htmlspecialchars($yara_report['version']); ?>)</span>
-                    <?php endif; ?>
-                </p>
-                <p class="mb-0">
-                    Détections YARA : <strong><?php echo (int) $yara_report['matches']; ?></strong>.
-                    <?php if ((int) $yara_report['matches'] > 0): ?>
-                        Elles apparaissent dans la liste ci-dessus avec le préfixe <code>YARA :</code>.
-                    <?php else: ?>
-                        Aucune signature YARA déclenchée.
-                    <?php endif; ?>
-                </p>
-            <?php else: ?>
-                <p class="mb-1 text-muted">
-                    Scan YARA non disponible : <?php echo htmlspecialchars($yara_report['error'] ?? 'inconnu'); ?>.
-                </p>
-                <p class="mb-0" style="font-size:13px;">
-                    Pour l'activer, installez le moteur YARA sur le serveur (<code>yara</code>),
-                    puis relancez le scan. Les règles par défaut se trouvent dans
-                    <code>rules/prestashop.yar</code>.
-                </p>
-            <?php endif; ?>
-        </div>
-    </div>
-
 <!-- =====================================================================
     SECTION AUDIT DE LA CONFIGURATION PHP (DÉTAILLÉ)
     =====================================================================
@@ -2663,7 +2922,7 @@ MODAL de détails - Affichage du contexte du fichier
                 </li>
                 <li><strong>Backups exposés :</strong> vérifiez qu’aucun fichier de sauvegarde (<code>*.sql</code>, <code>*.zip</code>, <code>*.tar.gz</code>, <code>*.bak</code>) n’est accessible en HTTP.</li>
                 <li><strong>Modules exposés :</strong> supprimez PHPUnit, outils de dev ou autres consoles présentes en production.</li>
-                <li><strong>Scan externe / antivirus :</strong> lancez un scan Sucuri/urlscan.io/antivirus/YARA pour une seconde opinion.</li>
+                <li><strong>Scan externe / antivirus :</strong> lancez un scan Sucuri/urlscan.io/antivirus pour une seconde opinion.</li>
             </ul>
 
             <h6>Procédure si compromission suspectée</h6>
