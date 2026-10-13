@@ -50,6 +50,7 @@ Usage : php scanner.php [options]
 
 Options :
   --path=<dossier>   Racine PrestaShop à analyser (défaut : auto-détection)
+  --yara=<fichier>   Fichier de règles YARA (défaut : rules/prestashop.yar)
   --json             Sortie au format JSON
   --csv              Sortie au format CSV
   --quiet            N'affiche que le résumé (pas le détail des fichiers)
@@ -61,6 +62,7 @@ Exemples :
   php scanner.php --path=/var/www/prestashop --quiet
   php scanner.php --json > rapport.json
   php scanner.php --csv  > rapport.csv
+  php scanner.php --yara=/chemin/mes-regles.yar
 
 TXT);
     exit(0);
@@ -502,9 +504,18 @@ function scan_directory($dir, $malicious_patterns, &$infected_files, &$total_php
 
         $file_path = $dir . '/' . $file;
 
-        // Exclusion des dossiers de cache volumineux pour éviter les timeouts
-        if (is_dir($file_path) && (strpos($file_path, '/var/cache') !== false || strpos($file_path, '/app/cache') !== false)) {
-            continue;
+        // Exclusion des dossiers de cache volumineux pour éviter les timeouts.
+        // On exclut aussi les dossiers de développement/versioning qui ne font
+        // PAS partie d'une installation PrestaShop en production : les scanner
+        // n'apporte rien et peut faire exploser le temps d'exécution (.git peut
+        // contenir des dizaines de milliers d'objets binaires).
+        if (is_dir($file_path)) {
+            $base = basename($file_path);
+            if (strpos($file_path, '/var/cache') !== false
+                || strpos($file_path, '/app/cache') !== false
+                || in_array($base, ['.git', '.github', '.svn', 'node_modules', '.idea', '.vscode'], true)) {
+                continue;
+            }
         }
 
         if (is_dir($file_path)) {
@@ -585,11 +596,15 @@ function scan_file($file_path, $malicious_patterns, &$infected_files, &$file_has
         $unit = strtolower(substr($limit_raw, -1));
         $val  = (int) $limit_raw;
         $mem_limit_bytes = $val * (($unit === 'g') ? 1073741824 : (($unit === 'm') ? 1048576 : (($unit === 'k') ? 1024 : 1)));
-        // On considère qu'un fichier consomme ~6x sa taille pendant le scan
-        // (contenu + tableau de lignes + captures regex). Marge de sécurité : 75%.
-        $estimated = ($size !== false ? $size : 0) * 6;
+        // Estimation de la consommation mémoire d'un fichier pendant le scan.
+        // Le coût réel n'est pas seulement le contenu : chaque preg_match_all()
+        // avec PREG_OFFSET_CAPTURE construit des tableaux de captures, et il y a
+        // ~150 motifs. Sur un fichier minifié (peu de lignes mais très longues),
+        // la consommation peut dépasser largement 10x la taille du fichier.
+        // On retient un facteur prudent de 12x et une marge de sécurité de 60%.
+        $estimated = ($size !== false ? $size : 0) * 12;
         $used      = memory_get_usage(true);
-        if ($mem_limit_bytes > 0 && ($used + $estimated) > ($mem_limit_bytes * 0.75)) {
+        if ($mem_limit_bytes > 0 && ($used + $estimated) > ($mem_limit_bytes * 0.60)) {
             $infected_files[] = [
                 'file'       => $file_path,
                 'line'       => null,
@@ -1451,6 +1466,23 @@ check_recently_modified_files($root_path, $infected_files, 7);
 check_prestashop_vulnerabilities($root_path, $prestashop_version, $infected_files);
 
 // ============================================================================
+// SCAN YARA (optionnel) - signatures composées
+// ============================================================================
+// Si le binaire `yara` est présent et qu'un fichier de règles est disponible,
+// on lance un scan YARA en complément des motifs regex internes.
+// Chemin des règles : --yara=<fichier> en CLI, sinon rules/prestashop.yar
+// (à côté du script). Le scan est silencieusement ignoré si YARA est absent.
+$yara_rules_path = __DIR__ . '/rules/prestashop.yar';
+if (PHP_SAPI === 'cli' && !empty($argv)) {
+    foreach ($argv as $arg) {
+        if (preg_match('/^--yara=(.+)$/', $arg, $m)) {
+            $yara_rules_path = $m[1];
+        }
+    }
+}
+$yara_report = scan_with_yara($root_path, $infected_files, $yara_rules_path);
+
+// ============================================================================
 // TRI DES RÉSULTATS - Ordre d'affichage
 // ============================================================================
 // Tri multi-critères :
@@ -1619,6 +1651,15 @@ TXT);
         echo "\n";
     }
 
+    // Résumé du scan YARA
+    if (!empty($yara_report['available'])) {
+        echo "  Scan YARA : " . $yara_report['matches'] . " détection(s)";
+        if (!empty($yara_report['version'])) echo " (moteur " . $yara_report['version'] . ")";
+        echo "\n\n";
+    } elseif (!empty($yara_report['error'])) {
+        echo "  Scan YARA : ignoré (" . $yara_report['error'] . ")\n\n";
+    }
+
     // Code de sortie : 2 si problèmes critiques, 1 si avertissements, 0 sinon.
     // Permet l'intégration dans des scripts / CI (ex. cron, GitLab CI).
     if ($stats['critical'] > 0)      exit(2);
@@ -1743,6 +1784,155 @@ function group_by_file($infected_files) {
         }
     }
     return array_values($groups);
+}
+
+/**
+ * FONCTION : scan_with_yara()
+ *
+ * OBJECTIF :
+ * Complète le scan interne (regex) par un scan YARA, si le binaire `yara` est
+ * disponible sur le serveur. YARA apporte des conditions composées (combinaisons
+ * de chaînes, compteurs, contraintes de taille) que des regex simples ne peuvent
+ * pas exprimer proprement, ce qui améliore la détection de webshells, skimmers
+ * et backdoors obfusqués.
+ *
+ * Le binaire est invoqué via proc_open() avec un tableau d'arguments (PAS via
+ * shell), afin d'éviter toute injection de commande. Les chemins de règles et
+ * de cibles sont passés tels quels, sans passer par le shell.
+ *
+ * PARAMÈTRES :
+ * @param string $root_path        Racine PrestaShop à analyser
+ * @param array  &$infected_files  Tableau de résultats (modifié par référence)
+ * @param string $rules_path       Chemin du fichier de règles YARA
+ *
+ * @return array ['available' => bool, 'scanned' => int, 'matches' => int, 'error' => ?string]
+ *
+ * LOGIQUE :
+ * 1. Vérifie que la fonction proc_open est disponible et que le binaire yara existe
+ * 2. Lance `yara <rules> <root_path> -r` (scan récursif)
+ * 3. Parse la sortie (une ligne par match : "NomDeRegle CheminFichier")
+ * 4. Ajoute chaque match comme détection critique
+ */
+function scan_with_yara($root_path, &$infected_files, $rules_path) {
+    $result = ['available' => false, 'scanned' => 0, 'matches' => 0, 'error' => null];
+
+    // proc_open peut être désactivé (disable_functions) sur certains hébergements.
+    if (!function_exists('proc_open') || !function_exists('proc_close')) {
+        $result['error'] = 'proc_open indisponible';
+        return $result;
+    }
+
+    // Vérifie la présence du binaire `yara` (et sa version) sans passer par le shell.
+    $yara_bin = null;
+    foreach (['yara'] as $candidate) {
+        $probe = @proc_open(
+            [$candidate, '--version'],
+            [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+            $pipes
+        );
+        if (is_resource($probe)) {
+            $out = stream_get_contents($pipes[1]);
+            fclose($pipes[1]); fclose($pipes[2]);
+            $code = proc_close($probe);
+            if ($code === 0 && trim($out) !== '') {
+                $yara_bin = $candidate;
+                $result['version'] = trim($out);
+                break;
+            }
+        }
+    }
+    if ($yara_bin === null) {
+        $result['error'] = 'binaire yara introuvable';
+        return $result;
+    }
+
+    // Vérifie que le fichier de règles existe et est lisible.
+    if (!is_file($rules_path) || !is_readable($rules_path)) {
+        $result['error'] = 'règles YARA introuvables : ' . $rules_path;
+        return $result;
+    }
+    if (!is_dir($root_path)) {
+        $result['error'] = 'racine introuvable : ' . $root_path;
+        return $result;
+    }
+
+    $result['available'] = true;
+
+    // Construction de la commande sous forme de TABLEAU d'arguments :
+    // aucune interpolation shell, donc aucun risque d'injection.
+    //   yara -r -w <rules> <root_path>
+    //   -r : récursif ; -w : masque les warnings de compilation.
+    $cmd = [$yara_bin, '-r', '-w', $rules_path, $root_path];
+
+    $descriptors = [1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
+    $process = @proc_open($cmd, $descriptors, $pipes);
+    if (!is_resource($process)) {
+        $result['error'] = 'échec du lancement de yara';
+        return $result;
+    }
+
+    $stdout = stream_get_contents($pipes[1]);
+    $stderr = stream_get_contents($pipes[2]);
+    fclose($pipes[1]);
+    fclose($pipes[2]);
+    $exit_code = proc_close($process);
+
+    // yara renvoie 0 (aucun match), 1 (match(s) trouvé(s)) ou >1 (erreur).
+    if ($exit_code > 1) {
+        $result['error'] = 'yara a retourné un code ' . $exit_code . ($stderr ? ' : ' . trim($stderr) : '');
+        return $result;
+    }
+
+    // Parsing de la sortie : chaque ligne = "NomDeRegle CheminDuFichier".
+    //
+    // IMPORTANT : on ignore les matches sur l'outillage du scanner lui-même.
+    // Le fichier de règles YARA (.yar) et le script scanner.php contiennent
+    // forcément les mots-clés des règles (eval, $_POST, noms de règles...) et
+    // se détecteraient eux-mêmes, polluant le rapport de faux positifs. Ces
+    // fichiers ne font pas partie de l'application PrestaShop analysée.
+    $self_real  = realpath(__FILE__) ?: __FILE__;
+    $rules_real = realpath($rules_path) ?: $rules_path;
+
+    $lines = preg_split('/\R/', trim((string)$stdout));
+    foreach ($lines as $line) {
+        $line = trim($line);
+        if ($line === '') continue;
+
+        // Le chemin peut contenir des espaces : on sépare sur le PREMIER espace.
+        $sep = strpos($line, ' ');
+        if ($sep === false) continue;
+        $rule_name = substr($line, 0, $sep);
+        $file_path = trim(substr($line, $sep + 1));
+        if ($file_path === '') continue;
+
+        // Exclusion de l'outillage du scanner (script + règles YARA).
+        $file_real = realpath($file_path) ?: $file_path;
+        if ($file_real === $self_real || $file_real === $rules_real) {
+            continue;
+        }
+        // Exclusion de tout fichier de règles YARA (.yar / .yara).
+        if (preg_match('/\.ya?ra?$/i', $file_path)) {
+            continue;
+        }
+
+        $result['matches']++;
+        $infected_files[] = [
+            'file'       => $file_path,
+            'line'       => null,
+            'pattern'    => 'YARA : ' . $rule_name,
+            'context'    => [
+                'Règle YARA déclenchée : ' . $rule_name,
+                'Détection basée sur une signature composée (YARA), complémentaire des motifs internes.',
+                'Vérifiez ce fichier manuellement : il correspond à un profil malveillant connu.',
+            ],
+            'start_line' => 1,
+            'mtime'      => @filemtime($file_path),
+            'severity'   => 'critical',
+            'md5'        => (is_file($file_path) ? @md5_file($file_path) : 'N/A') ?: 'N/A',
+        ];
+    }
+
+    return $result;
 }
 
 ?>
@@ -2258,6 +2448,45 @@ MODAL de détails - Affichage du contexte du fichier
         </small>
     </div>
     <?php endif; ?>
+
+    <!-- =====================================================================
+        SECTION SCAN YARA - Signatures composées
+        =====================================================================
+        Affiche le statut du scan YARA (moteur de détection par signatures).
+        Si le binaire `yara` est absent, on l'indique sans bloquer le rapport.
+    ===================================================================== -->
+    <div class="card mt-4">
+        <div class="card-header <?php echo !empty($yara_report['available']) ? 'bg-secondary text-white' : 'bg-light'; ?>">
+            🧬 Scan YARA (signatures de malwares)
+        </div>
+        <div class="card-body">
+            <?php if (!empty($yara_report['available'])): ?>
+                <p class="mb-1">
+                    <strong>Moteur YARA actif</strong>
+                    <?php if (!empty($yara_report['version'])): ?>
+                        <span class="text-muted">(version <?php echo htmlspecialchars($yara_report['version']); ?>)</span>
+                    <?php endif; ?>
+                </p>
+                <p class="mb-0">
+                    Détections YARA : <strong><?php echo (int) $yara_report['matches']; ?></strong>.
+                    <?php if ((int) $yara_report['matches'] > 0): ?>
+                        Elles apparaissent dans la liste ci-dessus avec le préfixe <code>YARA :</code>.
+                    <?php else: ?>
+                        Aucune signature YARA déclenchée.
+                    <?php endif; ?>
+                </p>
+            <?php else: ?>
+                <p class="mb-1 text-muted">
+                    Scan YARA non disponible : <?php echo htmlspecialchars($yara_report['error'] ?? 'inconnu'); ?>.
+                </p>
+                <p class="mb-0" style="font-size:13px;">
+                    Pour l'activer, installez le moteur YARA sur le serveur (<code>yara</code>),
+                    puis relancez le scan. Les règles par défaut se trouvent dans
+                    <code>rules/prestashop.yar</code>.
+                </p>
+            <?php endif; ?>
+        </div>
+    </div>
 
 <!-- =====================================================================
     SECTION AUDIT DE LA CONFIGURATION PHP (DÉTAILLÉ)

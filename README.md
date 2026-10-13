@@ -32,7 +32,8 @@ la configuration du serveur.
 - **Détection de PHPUnit** exposé dans les modules
 - **Analyse du `.htaccess`** racine (redirections, handlers PHP, prepend)
 - **Export des résultats** en CSV et JSON
-- **Scans externes gratuits** (Sucuri SiteCheck, urlscan.io)
+- **Scans externes gratuits** (Sucuri SiteCheck, urlscan.io, securityheaders.com)
+- **Scan YARA** (signatures composées de malwares, optionnel)
 - **Interface web responsive** (Bootstrap 5) **et** **mode ligne de commande**
 
 ---
@@ -81,8 +82,9 @@ php scanner.php [options]
 
 | Option             | Description                                                  |
 |--------------------|--------------------------------------------------------------|
-| `--path=<dossier>` | Racine PrestaShop à analyser (défaut : auto-détection)       |
-| `--json`           | Sortie au format JSON                                        |
+| `--path=<dossier>` | Racine PrestaShop à analyser (défaut : auto-détection) |
+| `--yara=<fichier>` | Fichier de règles YARA (défaut : `rules/prestashop.yar`)|
+| `--json`           | Sortie au format JSON                                  |
 | `--csv`            | Sortie au format CSV                                         |
 | `--quiet`          | N'affiche que le résumé (pas le détail des fichiers)         |
 | `--no-color`       | Désactive les couleurs ANSI                                  |
@@ -100,6 +102,9 @@ php scanner.php --path=/var/www/prestashop --quiet
 # Exports
 php scanner.php --path=/var/www/prestashop --json > rapport.json
 php scanner.php --path=/var/www/prestashop --csv  > rapport.csv
+
+# Scan YARA avec des règles personnalisées
+php scanner.php --path=/var/www/prestashop --yara=/chemin/mes-regles.yar
 ```
 
 ### Codes de sortie (intégration CI / cron)
@@ -125,6 +130,60 @@ ni clé API, pour une seconde opinion :
 
 > Ces scans nécessitent que le site soit **accessible publiquement**. Un domaine
 > local (`localhost`, `127.0.0.1`) ne peut pas être analysé par ces services.
+
+---
+
+## Scan YARA (optionnel)
+
+En complément des motifs regex internes, le scanner peut invoquer
+[YARA](https://virustotal.github.io/yara/) pour appliquer des **signatures
+composées** (combinaisons de chaînes, compteurs, contraintes de taille)
+impossibles à exprimer proprement en regex simple. Cela améliore la détection
+des webshells, skimmers et backdoors obfusqués.
+
+### Prérequis
+
+Le binaire `yara` doit être installé sur le serveur et accessible dans le `PATH` :
+
+```bash
+# Debian / Ubuntu
+sudo apt install yara
+
+# macOS (Homebrew)
+brew install yara
+```
+
+Si YARA est absent, le scan YARA est **automatiquement ignoré** (sans erreur ni
+blocage) et le reste du scan fonctionne normalement.
+
+### Règles par défaut
+
+Le fichier `rules/prestashop.yar` fournit un jeu de règles couvrant :
+
+- webshells génériques (exécution de code depuis une entrée utilisateur) ;
+- obfuscation (`eval` + `base64_decode`/`gzinflate`/`str_rot13`) ;
+- payloads cachés après `__halt_compiler()` ;
+- familles connues (WSO, panneaux webshell) ;
+- skimmers de carte bancaire (capture + exfiltration réseau) ;
+- backdoors d'exécution de code distant et reverse shells ;
+- mineurs de cryptomonnaie ;
+- `.htaccess` malveillants.
+
+### Utilisation
+
+Le scan YARA est automatique si le binaire et les règles sont présents. Pour
+utiliser vos propres règles :
+
+```bash
+php scanner.php --path=/var/www/prestashop --yara=/chemin/mes-regles.yar
+```
+
+Les détections YARA apparaissent dans le rapport avec le préfixe `YARA :`
+(sévérité `critical`).
+
+> Les fichiers de l'outillage du scanner (le script lui-même et les fichiers de
+> règles `.yar`) sont automatiquement exclus du scan YARA pour éviter les faux
+> positifs.
 
 ---
 
