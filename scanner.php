@@ -195,6 +195,14 @@ $urlscanUrl = ($host !== '')
     ? ('https://urlscan.io/domain/' . rawurlencode($host))
     : '';
 
+// Audit externe des en-têtes HTTP : securityheaders.com (100% gratuit, sans compte).
+// Compare les en-têtes de sécurité réellement renvoyés par le site avec les
+// bonnes pratiques, et attribue une note (A+ à F). On pré-remplit la requête
+// avec l'URL complète du site (schéma + hôte).
+$securityHeadersUrl = ($host !== '')
+    ? ('https://securityheaders.com/?q=' . rawurlencode($scheme . '://' . $host) . '&followRedirects=on')
+    : '';
+
 // ============================================================================
 // CONFIGURATION DES RÉPERTOIRES À SCANNER
 // ============================================================================
@@ -2200,6 +2208,26 @@ MODAL de détails - Affichage du contexte du fichier
         <div class="card-header bg-success text-white">
             🔒 Audit des Headers HTTP de Sécurité — ✅ Tous les headers recommandés sont présents
         </div>
+    </div>
+    <?php endif; ?>
+
+    <!-- =====================================================================
+        COMPARAISON EXTERNE - securityheaders.com (100% gratuit, sans compte)
+        =====================================================================
+        Bouton vers securityheaders.com pour confronter l'audit local des
+        en-têtes HTTP à une analyse externe indépendante (note de A+ à F).
+        Affiché dès qu'un domaine est détecté, que des en-têtes manquent ou non.
+    ===================================================================== -->
+    <?php if (!empty($securityHeadersUrl)): ?>
+    <div class="mt-3 mb-2">
+        <a class="btn btn-outline-secondary"
+           href="<?php echo htmlspecialchars($securityHeadersUrl, ENT_QUOTES, 'UTF-8'); ?>"
+           target="_blank" rel="noopener noreferrer">
+            🔬 Comparer avec securityheaders.com
+        </a>
+        <small class="text-muted ms-2" style="font-size:12px;">
+            Analyse externe indépendante des en-têtes de sécurité (note A+ à F).
+        </small>
     </div>
     <?php endif; ?>
 
