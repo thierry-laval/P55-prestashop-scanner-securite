@@ -21,38 +21,24 @@ _`Début du projet le 30/09/2025`_
 
 ### Table des matières
 
-1. [À propos du projet](#à-propos-du-projet)
-2. [Fonctionnalités](#fonctionnalités)
-3. [Prérequis](#prérequis)
-4. [Installation](#installation)
-5. [Configuration](#configuration)
-6. [Liste blanche (faux positifs)](#liste-blanche)
-7. [Données stockées](#données-stockées)
-8. [Emplacement des données](#emplacement-des-données)
-9. [Base de données](#base-de-données)
-10. [Fichiers et répertoires importants](#fichiers-et-répertoires-importants)
-11. [Sécurité](#sécurité)
-12. [Protection du répertoire](#protection-du-répertoire)
-13. [Configuration Apache / Nginx](#configuration-apache--nginx)
-14. [Variables d’environnement et configuration](#variables-denvironnement-et-configuration)
-15. [Identifiants et comptes](#identifiants-et-comptes)
-16. [API et services externes](#api-et-services-externes)
-17. [Utilisation — Interface web](#utilisation--interface-web)
-18. [Utilisation — Ligne de commande (CLI)](#utilisation--ligne-de-commande-cli)
-19. [Moteur de détection](#moteur-de-détection)
-20. [Scans externes gratuits](#scans-externes-gratuits)
-21. [Sauvegarde](#sauvegarde)
-22. [Mise à jour](#mise-à-jour)
-23. [Désinstallation](#désinstallation)
-24. [Dépannage](#dépannage)
-25. [Logs et diagnostic](#logs-et-diagnostic)
-26. [Architecture](#architecture)
-27. [Sécurité en production](#sécurité-en-production)
-28. [Avertissement](#avertissement)
-29. [Résumé de l’installation](#résumé-de-linstallation)
-30. [Limites connues](#limites-connues)
-31. [Feuille de route](#feuille-de-route)
-32. [Licence](#licence)
+|  |  |
+| --- | --- |
+| 1. [À propos du projet](#à-propos-du-projet) | 17. [Utilisation — Interface web](#utilisation--interface-web) |
+| 2. [Fonctionnalités](#fonctionnalités) | 18. [Utilisation — Ligne de commande (CLI)](#utilisation--ligne-de-commande-cli) |
+| 3. [Prérequis](#prérequis) | 19. [Moteur de détection](#moteur-de-détection) |
+| 4. [Installation](#installation) | 20. [Scans externes gratuits](#scans-externes-gratuits) |
+| 5. [Configuration](#configuration) | 21. [Sauvegarde](#sauvegarde) |
+| 6. [Liste blanche (faux positifs)](#liste-blanche) | 22. [Mise à jour](#mise-à-jour) |
+| 7. [Données stockées](#données-stockées) | 23. [Désinstallation](#désinstallation) |
+| 8. [Emplacement des données](#emplacement-des-données) | 24. [Dépannage](#dépannage) |
+| 9. [Base de données](#base-de-données) | 25. [Logs et diagnostic](#logs-et-diagnostic) |
+| 10. [Fichiers et répertoires importants](#fichiers-et-répertoires-importants) | 26. [Architecture](#architecture) |
+| 11. [Sécurité](#sécurité) | 27. [Sécurité en production](#sécurité-en-production) |
+| 12. [Protection du répertoire](#protection-du-répertoire) | 28. [Avertissement](#avertissement) |
+| 13. [Configuration Apache / Nginx](#configuration-apache--nginx) | 29. [Résumé de l’installation](#résumé-de-linstallation) |
+| 14. [Variables d’environnement et configuration](#variables-denvironnement-et-configuration) | 30. [Limites connues](#limites-connues) |
+| 15. [Identifiants et comptes](#identifiants-et-comptes) | 31. [Feuille de route](#feuille-de-route) |
+| 16. [API et services externes](#api-et-services-externes) | 32. [Licence](#licence) |
 
 ### 📖 À propos du projet
 
