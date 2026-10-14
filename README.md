@@ -1,5 +1,7 @@
 # ![Logo Thierry Laval](https://raw.githubusercontent.com/thierry-laval/archives/master/images/logo-portfolio.png "Logo Thierry Laval")
 
+<a id="top"></a>
+
 ## 👤 Auteur
 
 👤 **Thierry LAVAL** — [Contact](mailto:contact@thierrylaval.dev)
@@ -817,4 +819,4 @@ Donnez une ⭐️ &nbsp;si ce projet vous plaît !
 
 <img src="https://raw.githubusercontent.com/thierry-laval/P00-mes-archives/master/images/octocat-oley.png" width="300px" alt="Octocat">
 
-**[⬆ Retour en haut](#auteur)**
+**[⬆ Retour en haut](#top)**
