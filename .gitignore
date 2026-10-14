@@ -2,31 +2,26 @@
 # Scanner de sécurité PrestaShop — .gitignore
 # ============================================================================
 
-# --- Rapports générés par le scanner ---
-scan_report.csv
+# --- Rapports générés par le scanner scan_report.csv
 scan_report.json
 *.scan-report.*
 rapport*.csv
 rapport*.json
 
-# --- Fichiers de configuration locale / secrets ---
-.env
+# --- Fichiers de configuration locale / secrets .env
 .env.*
 *.local.php
 config.local.php
 
-# --- Éditeurs / IDE ---
-.vscode/
+# --- Éditeurs / IDE .vscode/
 .idea/
 *.swp
 *.swo
 *~
 .DS_Store
 
-# --- Dépendances (si un jour le projet en utilise) ---
-/vendor/
+# --- Dépendances (si un jour le projet en utilise) /vendor/
 /node_modules/
 
-# --- Logs ---
-*.log
+# --- Logs *.log
 logs/

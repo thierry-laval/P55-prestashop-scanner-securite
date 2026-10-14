@@ -1,12 +1,15 @@
 <?php
 /**
- * Scanner de Sécurité pour PrestaShop - Version 2.0.1
- * 
+ * Scanner de Sécurité pour PrestaShop - Version 2.2.0
+ *
+ * La version affichée dans le rapport provient de la constante VERSION
+ * définie plus bas (source unique de vérité) : ne modifiez que celle-ci.
+ *
  * DESCRIPTION GÉNÉRALE :
  * Ce script effectue un audit complet de sécurité sur une installation PrestaShop.
  * Il détecte les fichiers malveillants, les failles de configuration, les permissions
  * dangereuses et les en-têtes HTTP manquants ou mal configurés.
- * 
+ *
  * FONCTIONNALITÉS PRINCIPALES :
  * - Scan récursif des répertoires critiques (classes, modules, themes, etc.)
  * - Pattern matching pour détecter les comportements malveillants connus (150+ patterns)
@@ -21,17 +24,29 @@
  * @author Thierry Laval <https://thierrylaval.dev/>
  * @copyright 2007-2026 Thierry Laval
  * @license http://opensource.org/licenses/afl-3.0.php Academic Free License (AFL 3.0)
- * @version 2.0.1
+ * @version 2.2.0
  * @package PrestaShop_Scanner
+ *
+ * INSTALLATION : déposer TOUT le dossier prestashop-security-scanner à la racine
+ * de la boutique. La racine PrestaShop est auto-détectée dans l'ordre : dossier
+ * racine, puis /prestashop-security-scanner, /public, /httpdocs, /htdocs,
+ * /www, /web, /public_html (premier dossier contenant un marqueur PrestaShop).
+ * Toute l'arborescence PrestaShop est analysée (les caches et les dépendances
+ * vendor/ qui ne sont pas explicitement surveillées sont volontairement ignorés).
  */
 
 // ============================================================================
 // CONFIGURATION INITIALE - Réglages généraux du script
 // ============================================================================
 
+// Affichage des erreurs : utile pour diagnostiquer, mais dangereux en production
+// (révèle les chemins, les erreurs SQL, la configuration). Sur certains
+// hébergements, un simple warning PHP 8 converti en exception provoquait un
+// HTTP 500 en pleine page. On limite donc l'affichage aux erreurs réellement
+// bloquantes ; les dépréciations et notices sont masquées.
 ini_set('display_errors', 1);          // Affiche les erreurs PHP
 set_time_limit(600);                   // Limite de temps : 10 minutes pour le scan
-error_reporting(E_ALL);                // Signale toutes les erreurs
+error_reporting(E_ALL & ~E_DEPRECATED & ~E_NOTICE & ~E_WARNING); // Erreurs bloquantes uniquement
 @date_default_timezone_set('Europe/Paris'); // Définit le fuseau horaire
 
 // Active l'optimisation JIT (Just-In-Time) des regex PCRE pour améliorer les performances
@@ -39,8 +54,7 @@ if (defined('PCRE_JIT_SUPPORT')) {
     ini_set('pcre.jit', 1);
 }
 
-// --- Aide CLI (traitée immédiatement, AVANT tout scan) ---
-// Sans ce bloc précoce, `php scanner.php --help` lancerait le scan complet
+// --- Aide CLI (traitée immédiatement, AVANT tout scan) // Sans ce bloc précoce, `php scanner.php --help` lancerait le scan complet
 // (long) avant d'afficher l'aide. On court-circuite ici.
 if (PHP_SAPI === 'cli' && isset($argv[1]) && in_array('--help', $argv, true)) {
     fwrite(STDOUT, <<<TXT
@@ -109,20 +123,56 @@ $markers = [
     '/composer.json'                    // Tous les projets modernes
 ];
 
-// Recherche récursive vers le haut jusqu'à 5 niveaux pour trouver la racine.
-// On saute cette étape si --path a déjà fixé la racine en mode CLI ($found = true),
-// sinon la boucle écraserait le chemin fourni par l'utilisateur.
+// Recherche de la racine PrestaShop.
+// On saute cette étape si --path a déjà fixé la racine en mode CLI ($found = true).
+//
+// ORDRE DE RECHERCHE (important) :
+//   1. le dossier du script (cas où le scanner est déposé À LA RACINE de la boutique)
+//   2. les sous-dossiers usuels (cas où le dossier du scanner est dans la racine)
+//   3. seulement ensuite la remontée vers les parents (installations imbriquées)
+//
+// Cet ordre garantit, lorsque le dossier "prestashop-security-scanner" est
+// déposé à la base du dossier PrestaShop, que la racine détectée soit bien CE
+// dossier PrestaShop — et non son parent (ex. /home/x/public_html) qui pouvait
+// contenir d'autres sites à scanner par erreur.
+function dir_is_prestashop_root($dir, $markers) {
+    foreach ($markers as $marker) {
+        if (file_exists($dir . $marker)) return true;
+    }
+    return false;
+}
+
 if (!$found) {
-    for ($i = 0; $i < 5; $i++) {
-        foreach ($markers as $marker) {
-            if (file_exists($root_path . $marker)) {
+    // 1) Dossier du script.
+    if (dir_is_prestashop_root($root_path, $markers)) {
+        $found = true;
+    }
+
+    // 2) Sous-dossiers usuels du dossier du script (le scanner est à la racine).
+    if (!$found) {
+        $sub_candidates = ['/prestashop-security-scanner', '/public', '/httpdocs', '/htdocs', '/www', '/web', '/public_html', ''];
+        foreach ($sub_candidates as $sub) {
+            $candidate = $root_path . $sub;
+            if (is_dir($candidate) && dir_is_prestashop_root($candidate, $markers)) {
+                $root_path = $candidate;
                 $found = true;
-                break 2;
+                break;
             }
         }
-        $parent = dirname($root_path);
-        if ($parent === $root_path) break; // Arrête si on atteint la racine système
-        $root_path = $parent;
+    }
+
+    // 3) Remontée vers les parents (limite volontairement basse pour ne pas
+    //    partir scanner tout un hébergement mutualisé).
+    if (!$found) {
+        for ($i = 0; $i < 3; $i++) {
+            $parent = dirname($root_path);
+            if ($parent === $root_path) break; // Arrête si on atteint la racine système
+            $root_path = $parent;
+            if (dir_is_prestashop_root($root_path, $markers)) {
+                $found = true;
+                break;
+            }
+        }
     }
 }
 
@@ -143,7 +193,7 @@ $root_path = rtrim($root_path, '/');
 $prestashop_version = detect_prestashop_version($root_path);
 $php_version  = phpversion();
 $memory_limit = ini_get('memory_limit');
-$version      = '2.0.1';
+$version      = '2.2.0';
 
 // ============================================================================
 // CONFIGURATION DU SCAN EXTERNE (Sucuri SiteCheck)
@@ -203,6 +253,14 @@ $securityHeadersUrl = ($host !== '')
     ? ('https://securityheaders.com/?q=' . rawurlencode($scheme . '://' . $host) . '&followRedirects=on')
     : '';
 
+// Scan externe VirusTotal (gratuit, sans compte pour la consultation).
+// VirusTotal agrège le verdict de dizaines de moteurs antivirus/URL sur l'URL
+// du site. On utilise la vue publique /gui/url/, pré-remplie avec l'URL
+// complète (schéma + hôte).
+$virusTotalUrl = ($host !== '')
+    ? ('https://www.virustotal.com/gui/url/' . rawurlencode($scheme . '://' . $host))
+    : '';
+
 // ============================================================================
 // CONFIGURATION DES RÉPERTOIRES À SCANNER
 // ============================================================================
@@ -217,11 +275,12 @@ $directories = [
     $root_path . '/override/',          // Overrides (souvent compromis)
     $root_path . '/config/',            // Configuration
     
-    // Modules populaires (cibles fréquentes d'attaques)
-    $root_path . '/modules/appagebuilder/',
-    $root_path . '/modules/leoproductsearch/',
-    $root_path . '/modules/leofeature/',
-    $root_path . '/modules/leoblog/',
+    // Modules populaires (cibles fréquentes d'attaques) : PAS listés ici.
+    // Le dossier /modules entier est analysé en une seule passe juste après
+    // cette boucle (voir scan_directory($root_path . '/modules', ...)). Les
+    // lister ici en plus provoquait un DOUBLE SCAN : chaque fichier de ces
+    // modules était analysé deux fois et chaque détection apparaissait en
+    // double dans le rapport.
     
     // Répertoires standards
     $root_path . '/kerawen/',
@@ -234,7 +293,6 @@ $directories = [
     $root_path . '/vendor/smarty/smarty/libs/',  // Moteur de templating
     $root_path . '/pdf/',
     $root_path . '/mails/',             // Modèles d'e-mail
-    $root_path . '/vendor/doctrine/cache/',      // Cache (dépendance ORM)
     $root_path . '/bin/',               // Scripts exécutables
     $root_path . '/upload/',            // Zone de téléchargement d'utilisateur
     $root_path . '/tools/',             // Scripts d'admin
@@ -247,10 +305,20 @@ $directories = [
 // PrestaShop permet de renommer le dossier 'admin' pour des raisons de sécurité
 // Ce code scanne les répertoires non-standards pour les découvrir
 
-$root_dirs = scandir($root_path);
+$root_dirs = @scandir($root_path);
+// scandir() renvoie false si le dossier est illisible : sans ce garde-fou,
+// le foreach qui suit provoquerait un warning PHP 8 ("foreach() argument must
+// be of type array|object") et un risque d'affichage cassé.
+if (!is_array($root_dirs)) {
+    $root_dirs = [];
+}
 $excluded_dirs = [
     '.', '..', 'app', 'bin', 'cache', 'classes', 'config', 'controllers', 'docs',
-    'download', 'img', 'install', 'js', 'localization', 'log', 'mails', 'modules',
+    // 'modules' est volontairement ABSENT de cette liste : le dossier des modules
+    // n'est pas un « dossier d'admin renommé ». Il doit être ajouté à
+    // $directories pour que TOUS les modules soient analysés (voir plus bas),
+    // ce que la version précédente ne faisait pas.
+    'download', 'img', 'install', 'js', 'localization', 'log', 'mails',
     'override', 'pdf', 'src', 'themes', 'tools', 'translations', 'upload', 'var',
     'vendor', 'webservice', 'node_modules', '.git', '.github'
 ];
@@ -267,19 +335,47 @@ foreach ($root_dirs as $dir) {
 // On accepte à la fois des chemins complets et des fragments de chemins :
 // - '/vendor/' pour ignorer toute la librairie vendor
 // - '/js/tiny_mce/' si TinyMCE est toujours propre
-// - '/tests.prestashop.' pour ignorer des dossiers de tests temporaires
 // Ajoutez ici les fichiers ou dossiers qui sont légitimes dans votre
 // environnement et que vous ne souhaitez pas voir remontés comme "infectés".
 
+// Sauf mention contraire, chaque entrée ignore à la fois les FICHIERS et les
+// DOSSIERS : « /upload/ » exclut tout upload/ (racine, modules, thèmes), pas
+// seulement celui de la racine.
 $whitelist = [
     // Exemple de fichier légitime contenant la chaîne card_number
     $root_path . '/src/Adapter/Order/QueryHandler/GetOrderForViewingHandler.php',
-    // Cas fréquemment signalés par l'utilisateur
-    '/vendor/',
+    // Cas fréquemment signalés par l'utilisateur.
+    // Les dépendances Composer sont ignorées, mais le moteur de templating
+    // (vendor/smarty/smarty/libs) reste analysé car il est listé explicitement
+    // dans $directories.
+    '/vendor/bin/',
+    '/vendor/composer/',
+    '/vendor/phpunit/',
+    '/vendor/phpstan/',
+    '/vendor/symfony/',
+    '/vendor/doctrine/',
+    '/vendor/twig/',
+    '/vendor/monolog/',
+    '/vendor/guzzlehttp/',
     '/js/tiny_mce/',
-    '/tests.prestashop.',
+    '/bundles/',
 
-    // --- Bundles d'administration légitimes (PrestaShop 8/9, Symfony, API Platform) ---
+    // --- Faux positifs structurels des installations PrestaShop (racine comme
+    // sous-dossiers : « /upload/ » couvre upload/ ET modules/<mod>/upload/).
+    '/upload/',
+    '/download/',
+    '/var/',
+    '/cache/',
+    '/translations/',
+    '/localization/',
+    '/log/',
+    '/logs/',
+    // Contrôleurs et thèmes : des chemins contenant « /modules/ » ou
+    // « /override/ » n'y déclenchent plus l'alerte « PHP dans un dossier média ».
+    '/controllers/',
+    '/themes/',
+
+    // --- Bundles d'administration légitimes (PrestaShop 8/9, Symfony, API Platform)
     // Ces fichiers sont du code vendor minifié livré par l'admin. Ils contiennent
     // naturellement des fetch()/URL externes et génèrent des faux positifs critiques
     // (ex. bundles/apiplatform/graphql-playground/middleware.js).
@@ -290,6 +386,44 @@ $whitelist = [
     '/bundles/nelmioapidoc/',
     'graphql-playground',
     '/admin-dev/themes/',
+
+    // --- Faux positifs documentés
+    // Fichier .env légitime de PrestaShop (variables de feature flags, proxies...).
+    // Il ne contient ni identifiants BDD ni secrets de production.
+    '/.env',
+    // Binaires .phar d'outils de développement (PHPStan, PHPUnit, PHP-CS-Fixer...).
+    // Distribués sous forme de .phar par leurs auteurs ; leur simple présence
+    // n'est pas une compromission.
+    'phpstan.phar',
+    'phpunit.phar',
+    'php-cs-fixer.phar',
+    'phpcs.phar',
+
+    // --- Autres faux positifs documentés
+    // Suffixes de fichiers modèles (.in, .dist, .tmpl...) : Template.php.in de
+    // HTMLPurifier (dépendance Composer légitime) est signalé à tort comme une
+    // "double extension suspecte" (.php.in).
+    '.php.in',
+    '.php.dist',
+    '.php.tmpl',
+    '.php.sample',
+
+    // --- Modules de sécurité / anti-malware installés volontairement.
+    // Ces modules contiennent PAR NATURE les signatures et le code des menaces
+    // qu'ils détectent (chaînes eval(gzinflate(base64_decode(...))), motifs
+    // Alfa_shell, appels $_REQUEST, honeypots, tests unitaires simulant des
+    // payloads). Le scanner se détecte donc lui-même : ce sont des faux positifs.
+    // ATTENTION : à ne whitelister QUE si le module est connu et provient d'une
+    // source de confiance. Un module de sécurité compromis reste compromis.
+    // Pour Sgk MyDoctor (PrestaShop security doctor) :
+    'sgkmydoctor/classes/',
+    'sgkmydoctor/tests/',
+
+    // --- Builders de pages (Elementor / stsitebuilder).
+    // Les bundles JS minifiés d'Elementor utilisent atob() + obfuscation
+    // (WebSkimmer_Obfus_atob / _wide). C'est un faux positif fréquent :
+    // ce sont des fichiers de build légitimes du page builder.
+    '/stsitebuilder/libs/elementor/assets/js/',
 ];
 
 // ============================================================================
@@ -299,16 +433,21 @@ $whitelist = [
 // Chaque pattern couvre une catégorie de menaces spécifiques
 
 $malicious_patterns = [
-    // --- Codage / Décodage d'obfuscation ---
-    'base64_decode' => '/base64_decode\([\'"][a-zA-Z0-9\/\+=]+[\'"]\)/i',
+    // --- Codage / Décodage d'obfuscation
+    // (Cette ligne avait été « avalée » par un commentaire : le motif
+    // base64_decode n'était donc plus jamais recherché, alors qu'il est la
+    // signature n°1 de l'obfuscation PHP/malware.)
+    'base64_decode' => '/base64_decode\s*\(/i',
 
-    // --- Configuration SSL/TLS suspecte ---
+    // --- Configuration SSL/TLS suspecte
+    // (Là encore, le motif avait été absorbé par le commentaire de section :
+    // ces trois règles n'étaient jamais appliquées.)
     'curl_setopt_ssl_verifypeer' => '/curl_setopt\(\s*\$ch\s*,\s*CURLOPT_SSL_VERIFYPEER\s*,\s*false\s*\)/i',
-    
-    // --- Variables POST suspectes ---
+
+    // --- Variables POST suspectes
     'advert_hash_post' => '/\$_POST\[[\'"]advert_hash[\'"]\]/i',
-    
-    // --- Hachage non sécurisé ---
+
+    // --- Hachage non sécurisé
     'md5_usage' => '/md5\([\'"][a-zA-Z0-9\/\+=]*[\'"]?\)/i',
     'gzuncompress' => '/gzuncompress\([\'"][a-zA-Z0-9\/\+=]*[\'"]?\)/i',
     'file_get_contents' => '/file_get_contents\([\'"][a-zA-Z0-9\/\+=]*[\'"]?\)/i',
@@ -401,7 +540,7 @@ $malicious_patterns = [
     'php_filter_usage' => '/php:\/\/filter\/resource=/i',
     'htaccess_suspicious_redirect' => '/RewriteRule\s+.*https?:\/\/[^\s]+/i',
 
-    // --- .htaccess malveillants (souvent dans /img/ ou /upload/) ---
+    // --- .htaccess malveillants (souvent dans /img/ ou /upload/)
     'htaccess_malicious_handler'
         => '/(SetHandler|AddHandler|AddType)\s+application\/x-httpd-php/i',
     'htaccess_php_engine_on'
@@ -463,10 +602,31 @@ $pattern_severity = [
     'htaccess_suspicious_redirect' => 'warning',
     'tools_get_value'            => 'warning',
     'db_execute_concat'          => 'warning',
+    // Signatures de code dont un simple affichage/chaîne littérale suffit à
+    // déclencher le motif : elles sont partout dans du code légitime, on les
+    // rétrograde pour que les vrais backdoors (eval, obfuscation, exfiltration)
+    // restent visibles en tête de rapport.
+    'Xor_decoder_pattern'        => 'warning',
+    'Variable_function_exec'     => 'warning',
     // Appels réseau sortants : très fréquents dans du JS légitime (analytics, CDN,
     // playgrounds d'API...). On les rétrograde pour ne pas noyer le rapport.
     'WebSkimmer_Exfil_HTTP'      => 'warning',
     'WebSkimmer_Exfil_Image'     => 'warning',
+
+    // --- Fonctions d'exécution système et d'inclusion : LEGITIMES dans du code
+    // applicatif normal (clients MCP/SOAP, génération PDF, ImageMagick, git,
+    // ffmpeg, mises à jour de modules...). Elles ne constituent une backdoor que
+    // lorsqu'elles reçoivent une entrée utilisateur : c'est exactement ce que
+    // couvrent les motifs dédiés (Dynamic_request_call, eval_superglobals,
+    // obfuscated_eval_base64, WebSkimmer_*…). Les déclarer "critical" faisait
+    // remonter tout module un peu technique comme une compromission.
+    'shell_exec'                 => 'info',
+    'passthru'                   => 'info',
+    'proc_open'                  => 'info',
+    'create_function'            => 'info',
+    'include_superglobals'       => 'warning',
+    // Inclusion via @include('chemin') : idiome classique des vues/templates.
+    'at_includes'                => 'info',
 ];
 
 // Initialisation
@@ -476,7 +636,7 @@ $file_hashes     = []; // Pour stocker les hashes MD5 des fichiers suspects
 
 /**
  * FONCTION : scan_directory()
- * 
+ *
  * OBJECTIF :
  * Parcourt récursivement un répertoire et tous ses sous-répertoires pour scanner
  * les fichiers PHP, JavaScript, Templates et autres extensions sensibles.
@@ -514,6 +674,15 @@ function scan_directory($dir, $malicious_patterns, &$infected_files, &$total_php
                 || in_array($base, ['.git', '.github', '.svn', 'node_modules', '.idea', '.vscode'], true)) {
                 continue;
             }
+            // On saute les dossiers de dépendances (vendor/, node_modules/) : les
+            // traverser inutilement coûte cher, et tout code vendor/ est du code
+            // tiers légitime (il contient naturellement proc_open, base64_decode,
+            // fetch()…). C'est en particulier le cas des modules qui embarquent
+            // leurs propres dépendances : modules/<mod>/vendor/.
+            if (strpos($file_path, '/vendor/') !== false
+                || basename($file_path) === 'vendor') {
+                continue;
+            }
         }
 
         if (is_dir($file_path)) {
@@ -549,6 +718,24 @@ function scan_directory($dir, $malicious_patterns, &$infected_files, &$total_php
  * 5. Enregistre chaque match avec contexte et hash MD5
  */
 function scan_file($file_path, $malicious_patterns, &$infected_files, &$file_hashes, $whitelist, $pattern_severity) {
+    global $root_path;
+    $root_path_short = $root_path;
+
+    // Le scanner lui-même contient forcément les chaînes recherchées (noms des
+    // patterns, IOC, exemples de code) : c'est un faux positif garanti.
+    if (basename($file_path) === 'scanner.php') return;
+
+    // Les .htaccess ont leur propre analyseur dédié (scan_root_htaccess(),
+    // qui parcourt TOUTE l'arborescence). Les passer aussi ici produisait un
+    // doublon dans le rapport (mêmes règles signalées deux fois).
+    if (strcasecmp(basename($file_path), '.htaccess') === 0) return;
+
+    // Taille initialisée à 0 : le premier bloc ci-dessous ne la définit que si
+    // MAX_FILE_SIZE > 0. Sans cela, la variable restait indéfinie lorsque la
+    // limite était désactivée (MAX_FILE_SIZE = 0), ce qui déclenchait une
+    // erreur fatale en PHP 8 lors de l'estimation mémoire ci-dessous
+    // (HTTP 500).
+    $size = 0;
 
     // Vérification de la liste blanche (fichiers connus sans danger).
     // Chaque élément de la whitelist peut être un chemin complet ou un fragment
@@ -630,12 +817,21 @@ function scan_file($file_path, $malicious_patterns, &$infected_files, &$file_has
     $lines      = explode("\n", $content);
     $line_count = count($lines);
 
-    // Alerte sur les fichiers PHP dans des dossiers d'images/upload (Zone Interdite)
-    $is_suspicious_dir = (
-        strpos($file_path, '/img/') !== false || 
-        strpos($file_path, '/upload/') !== false || 
-        strpos($file_path, '/download/') !== false
-    );
+    // Alerte sur les fichiers PHP dans des dossiers d'images/upload (Zone Interdite).
+    //
+    // Détection volontairement RESTREINTE. L'ancienne version cherchait
+    // « /img/ », « /upload/ » ou « /download/ » n'importe où dans le chemin, ce
+    // qui produisait des faux positifs critiques sur des structures LEGITIMES :
+    //   themes/<theme>/assets/img/...
+    //   themes/<theme>/modules/<mod>/views/img/... (souvent des .php légitimes)
+    //   modules/<mod>/override/controllers/admin/.../img/...
+    // On ne cible donc que les emplacements média RÉELLEMENT exposés, c'est-à-dire
+    // le dossier média à la RACINE du site (chemin relatif commençant par
+    // img/, upload/ ou download/).
+    $rel = $root_path_short !== ''
+        ? ltrim(substr($file_path, strlen($root_path_short)), '/')
+        : ltrim($file_path, '/');
+    $is_suspicious_dir = (bool) preg_match('~^(img|upload|download)/~i', $rel);
     // Exclusion des fichiers index.php légitimes (sécurité anti-listing de PrestaShop)
     // Exclusion de config.php (utilisé par Creative Elements)
     if ($is_suspicious_dir && pathinfo($file_path, PATHINFO_EXTENSION) === 'php' && !in_array(basename($file_path), ['index.php', 'config.php'])) { $infected_files[] = [
@@ -651,7 +847,19 @@ function scan_file($file_path, $malicious_patterns, &$infected_files, &$file_has
         // On continue le scan pour voir s'il matche aussi des patterns connus
     }
 
+    // Optimisation : sur un fichier volumineux (bundle JS minifié, template de
+    // thème…), une partie des motifs est du bruit pur (md5, atob, urldecode…)
+    // classé "info". Les appliquer coûte cher (regex sur des lignes très
+    // longues) pour un résultat que l'utilisateur ne consulte quasiment jamais.
+    // On les ignore au-delà de 1 Mo, en conservant TOUS les motifs critiques et
+    // warnings (donc la détection reste fiable sur la sécurité).
+    $skip_info_patterns = ($size !== false && $size > 1048576);
+
     foreach ($malicious_patterns as $pattern_name => $pattern) {
+        if ($skip_info_patterns && ($pattern_severity[$pattern_name] ?? 'critical') === 'info') {
+            continue;
+        }
+
         $_preg_ok = @preg_match_all($pattern, $content, $matches, PREG_OFFSET_CAPTURE);
         if (!$_preg_ok || empty($matches[0])) continue;
 
@@ -703,7 +911,7 @@ function scan_file($file_path, $malicious_patterns, &$infected_files, &$file_has
 
 /**
  * FONCTION : get_context()
- * 
+ *
  * OBJECTIF :
  * Extrait les lignes de code autour d'une détection pour afficher le contexte.
  * Cela permet à l'utilisateur de comprendre le code détecté (5 lignes avant, 15 après).
@@ -723,7 +931,7 @@ function get_context($lines, $line_number, $line_count) {
 
 /**
  * FONCTION : detect_prestashop_version()
- * 
+ *
  * OBJECTIF :
  * Détermine la version de PrestaShop installée sans exécuter de code PHP.
  * Supporte les versions 1.6, 1.7, et 8.x par recherche de fichiers de configuration.
@@ -774,7 +982,7 @@ function detect_prestashop_version($root_path) {
                 return $m[1];
             }
         }
-        
+
         // Fallback : include (méthode originale) si la lecture brute échoue
         if (!defined('_PS_VERSION_')) {
             @include($settings_file);
@@ -806,7 +1014,7 @@ function detect_prestashop_version($root_path) {
 
 /**
  * FONCTION : scan_smarty_config_file()
- * 
+ *
  * OBJECTIF :
  * Vérifie la configuration du cache Smarty (moteur de templating)
  * Détecte les configurations dangereuses utilisant MySQL comme stockage de cache.
@@ -844,14 +1052,123 @@ check_install_folder($infected_files, $root_path);
 // Appel de la vérification des permissions sur les fichiers sensibles
 check_sensitive_permissions($infected_files, $root_path);
 
-// Appel de la détection des fichiers PHP déguisés (extensions trompeuses)
-check_suspicious_extensions($root_path, $infected_files);
+// Appel de la détection des fichiers PHP déguisés (extensions trompeuses).
+// $whitelist est transmise pour ignorer les faux positifs (bundles d'admin,
+// .phar d'outils de dev, dossiers vendor...).
+check_suspicious_extensions($root_path, $infected_files, $whitelist);
 
 // Appel de la détection des fichiers sensibles exposés (backups, .env, phpinfo...)
-check_exposed_sensitive_files($root_path, $infected_files);
+check_exposed_sensitive_files($root_path, $infected_files, $whitelist);
 
 // Appel de la détection des domaines de skimmers connus (liste noire externe)
-check_skimmer_domains($root_path, $infected_files, __DIR__ . '/data/skimmer-domains.txt');
+check_skimmer_domains($root_path, $infected_files, __DIR__ . '/data/skimmer-domains.txt', $whitelist);
+
+// Helper de whitelist pour les contrôles hors scan_directory().
+function path_is_whitelisted($path, $whitelist) {
+    foreach ((array) $whitelist as $wh_item) {
+        if ($wh_item !== '' && strpos($path, $wh_item) !== false) return true;
+    }
+    return false;
+}
+
+// ============================================================================
+// WHITELIST DYNAMIQUE PERSISTANTE (data/whitelist.json)
+// ============================================================================
+// En plus de la whitelist statique codée en dur ($whitelist), l'utilisateur peut
+// envoyer n'importe quel faux positif en liste blanche depuis l'interface. Les
+// entrées sont persistées dans data/whitelist.json (un tableau JSON de chaînes,
+// chaque chaîne étant un fragment de chemin comme '/vendor/').
+// Le fichier est relu au début de chaque scan : aucune migration nécessaire.
+
+/**
+ * Chemin du fichier de whitelist persistante.
+ * @return string
+ */
+function get_whitelist_file_path() {
+    return __DIR__ . '/data/whitelist.json';
+}
+
+/**
+ * Charge la whitelist persistante depuis data/whitelist.json.
+ * Retourne un tableau vide si le fichier est absent, illisible ou invalide.
+ *
+ * @return array Liste de fragments de chemins à ignorer
+ */
+function load_persistent_whitelist() {
+    $file = get_whitelist_file_path();
+    if (!is_file($file) || !is_readable($file)) return [];
+
+    $raw = @file_get_contents($file);
+    if ($raw === false || trim($raw) === '') return [];
+
+    $data = json_decode($raw, true);
+    if (!is_array($data)) return [];
+
+    // Ne conserve que des chaînes non vides.
+    $out = [];
+    foreach ($data as $entry) {
+        if (is_string($entry) && trim($entry) !== '') {
+            $out[] = trim($entry);
+        }
+    }
+    return $out;
+}
+
+/**
+ * Enregistre la whitelist persistante dans data/whitelist.json.
+ * Crée le dossier data/ au besoin.
+ *
+ * @param array $entries Liste de fragments de chemins
+ * @return bool True si l'écriture a réussi
+ */
+function save_persistent_whitelist($entries) {
+    $file = get_whitelist_file_path();
+    $dir  = dirname($file);
+    if (!is_dir($dir)) {
+        if (!@mkdir($dir, 0755, true) && !is_dir($dir)) return false;
+    }
+    $entries = array_values(array_unique(array_filter(array_map('trim', (array) $entries), 'strlen')));
+    return @file_put_contents($file, json_encode($entries, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES), LOCK_EX) !== false;
+}
+
+/**
+ * Ajoute un ou plusieurs fragments à la whitelist persistante.
+ *
+ * @param array $new_entries
+ * @return bool
+ */
+function add_to_persistent_whitelist($new_entries) {
+    $current = load_persistent_whitelist();
+    foreach ((array) $new_entries as $e) {
+        if (is_string($e) && trim($e) !== '') {
+            $current[] = trim($e);
+        }
+    }
+    return save_persistent_whitelist($current);
+}
+
+/**
+ * Retire un fragment de la whitelist persistante.
+ *
+ * @param string $entry
+ * @return bool
+ */
+function remove_from_persistent_whitelist($entry) {
+    $entry = trim($entry);
+    $current = load_persistent_whitelist();
+    $filtered = [];
+    foreach ($current as $e) {
+        if ($e !== $entry) $filtered[] = $e;
+    }
+    return save_persistent_whitelist($filtered);
+}
+
+// Fusion de la whitelist statique avec la whitelist persistante.
+// Ainsi toutes les fonctions recevant $whitelist (scan_file,
+// check_suspicious_extensions, scan_root_htaccess, scan_root_user_ini,
+// scan_phpunit_in_modules...) bénéficient automatiquement des ajouts.
+$persistent_whitelist = load_persistent_whitelist();
+$whitelist = array_values(array_unique(array_merge($whitelist, $persistent_whitelist)));
 
 // Appel de la vérification des headers HTTP de sécurité
 $homepageUrl = $scheme . '://' . $host . '/';
@@ -860,7 +1177,7 @@ check_http_security_headers($homepageUrl, $header_issues);
 
 /**
  * FONCTION : scan_phpunit_in_modules()
- * 
+ *
  * OBJECTIF :
  * Détecte la présence de PHPUnit (framework de test) dans le répertoire modules.
  * PHPUnit laissé accessible est un risque de sécurité car il expose des détails du code.
@@ -875,7 +1192,7 @@ check_http_security_headers($homepageUrl, $header_issues);
  * PHPUnit exposerait les tests du code, révélant sa structure et ses failles.
  * Doit être supprimé en production.
  */
-function scan_phpunit_in_modules($dir, &$infected_files) {
+function scan_phpunit_in_modules($dir, &$infected_files, $whitelist = []) {
     if (!is_dir($dir)) return;
 
     $files = scandir($dir);
@@ -883,6 +1200,15 @@ function scan_phpunit_in_modules($dir, &$infected_files) {
         if ($file == '.' || $file == '..') continue;
 
         $file_path = $dir . '/' . $file;
+        $lower = str_replace('\\', '/', strtolower($file_path));
+
+        // Ignore les dépendances Composer : les dossiers PHPUnit présents dans
+        // les vendor/ de modules officiels (php-cs-fixer, doctrine/deprecations...)
+        // sont des dépendances internes, PAS un PHPUnit exposé à la racine.
+        if (strpos($lower, '/vendor/') !== false || path_is_whitelisted($file_path, $whitelist)) {
+            continue;
+        }
+
         if (is_dir($file_path) && strtolower($file) === 'phpunit') {
             $infected_files[] = [
                 'file'       => $file_path,
@@ -908,14 +1234,14 @@ function scan_phpunit_in_modules($dir, &$infected_files) {
         }
 
         if (is_dir($file_path)) {
-            scan_phpunit_in_modules($file_path, $infected_files);
+            scan_phpunit_in_modules($file_path, $infected_files, $whitelist);
         }
     }
 }
 
 /**
  * FONCTION : check_install_folder()
- * 
+ *
  * OBJECTIF :
  * Détecte la présence du dossier /install à la racine de PrestaShop.
  * C'est une FAILLE CRITIQUE - permet à un attaquant de réinstaller le site.
@@ -950,7 +1276,7 @@ function check_install_folder(&$infected_files, $root_path) {
 
 /**
  * FONCTION : check_sensitive_permissions()
- * 
+ *
  * OBJECTIF :
  * Vérifie les permissions d'accès aux fichiers sensibles (configuration, base de données).
  * Détecte les permissions "World Writable" (777) et "autres écriture" (002) dangereuses.
@@ -1017,7 +1343,7 @@ function check_sensitive_permissions(&$infected_files, $root_path) {
         if (!file_exists($path)) continue;
 
         $perms = fileperms($path);
-        
+
         // Détection robuste du 777 (rwxrwxrwx) via masque binaire
         if (($perms & 0777) === 0777) {
             $infected_files[] = [
@@ -1055,6 +1381,87 @@ function check_sensitive_permissions(&$infected_files, $root_path) {
  *
  * @return array Rapport : ['ok' => [...], 'fail' => [...]]
  */
+function delete_detected_phpunit($infected_files, $root_path) {
+    $report = ['ok' => [], 'fail' => []];
+
+    // Racine réelle, pour vérifier qu'aucun chemin ne sort de l'installation.
+    $root_real = realpath($root_path);
+    if ($root_real === false) {
+        return ['ok' => [], 'fail' => [['', 'Racine PrestaShop introuvable']]];
+    }
+    $root_real = rtrim($root_real, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
+
+    // On ne travaille QUE sur les entrées détectées par scan_phpunit_in_modules().
+    // Aucun chemin fourni par l'utilisateur n'est accepté.
+    foreach ($infected_files as $entry) {
+        $pattern = $entry['pattern'] ?? '';
+        if (strpos($pattern, 'phpunit') === false) continue;
+
+        $path = $entry['file'] ?? '';
+        if ($path === '' || !file_exists($path)) {
+            $report['fail'][] = [$path, 'Chemin introuvable'];
+            continue;
+        }
+
+        // Garde-fou : le chemin doit rester dans la racine analysée.
+        $real = realpath($path);
+        if ($real === false || strpos($real, $root_real) !== 0) {
+            $report['fail'][] = [$path, 'Chemin hors de la racine analysée (suppression refusée)'];
+            continue;
+        }
+
+        // Le fichier/dossier doit s'appeler exactement "phpunit".
+        if (strtolower(basename($real)) !== 'phpunit') {
+            $report['fail'][] = [$path, 'Le nom ne correspond pas exactement à "phpunit" (suppression refusée)'];
+            continue;
+        }
+
+        if (is_dir($real)) {
+            if (delete_directory_recursive($real)) {
+                $report['ok'][] = [$path, 'Répertoire supprimé'];
+            } else {
+                $report['fail'][] = [$path, 'Suppression du répertoire refusée (droits insuffisants ou fichier verrouillé)'];
+            }
+        } else {
+            if (@unlink($real)) {
+                $report['ok'][] = [$path, 'Fichier supprimé'];
+            } else {
+                $report['fail'][] = [$path, 'Suppression du fichier refusée (droits insuffisants ou fichier verrouillé)'];
+            }
+        }
+    }
+
+    return $report;
+}
+
+/**
+ * FONCTION : delete_directory_recursive()
+ *
+ * OBJECTIF :
+ * Supprime récursivement un dossier et tout son contenu.
+ * Utilisée uniquement par delete_detected_phpunit(), sur un chemin déjà validé
+ * (dans la racine analysée et nommé exactement "phpunit").
+ *
+ * @param string $dir Chemin absolu du dossier à supprimer
+ * @return bool true si la suppression a réussi, false sinon
+ */
+function delete_directory_recursive($dir) {
+    if (!is_dir($dir)) return false;
+
+    $ok = true;
+    foreach (scandir($dir) as $item) {
+        if ($item === '.' || $item === '..') continue;
+        $path = $dir . '/' . $item;
+        if (is_dir($path)) {
+            $ok = delete_directory_recursive($path) && $ok;
+        } else {
+            $ok = @unlink($path) && $ok;
+        }
+    }
+
+    return @rmdir($dir) && $ok;
+}
+
 function fix_detected_permissions(&$infected_files) {
     $report = ['ok' => [], 'fail' => []];
 
@@ -1104,7 +1511,7 @@ function fix_detected_permissions(&$infected_files) {
  *
  * @return void
  */
-function check_suspicious_extensions($root_path, &$infected_files) {
+function check_suspicious_extensions($root_path, &$infected_files, $whitelist = []) {
     if (!is_dir($root_path)) return;
 
     // Extensions PHP alternatives qui, selon la config Apache/PHP, peuvent
@@ -1126,6 +1533,8 @@ function check_suspicious_extensions($root_path, &$infected_files) {
         $path = $fileInfo->getPathname();
         // Ignore les dossiers de cache/versioning (bruit).
         if (preg_match('~/(var/cache|app/cache|\.git|node_modules)/~', $path)) continue;
+        // Respecte la whitelist (vendor, bundles d'admin, .phar d'outils de dev...).
+        if (path_is_whitelisted($path, $whitelist)) continue;
 
         $name = $fileInfo->getFilename();
         $ext  = strtolower($fileInfo->getExtension());
@@ -1133,6 +1542,11 @@ function check_suspicious_extensions($root_path, &$infected_files) {
 
         // 1) Extensions PHP alternatives (.phtml, .php5, .phar...).
         if (in_array($ext, $php_like_ext, true)) {
+            // Les .phar distribués par les outils de développement (PHPStan, PHPUnit,
+            // PHP-CS-Fixer...) sont des faux positifs : on ne les signale pas.
+            if ($ext === 'phar' && preg_match('/^(phpstan|phpunit|php-cs-fixer|phpcs|composer|box)\.phar$/i', $name)) {
+                continue;
+            }
             $infected_files[] = [
                 'file'       => $path,
                 'line'       => null,
@@ -1151,7 +1565,9 @@ function check_suspicious_extensions($root_path, &$infected_files) {
         }
 
         // 2) Double extension trompeuse : nom.php.<autre>
-        if (preg_match('/\.php\.[a-z0-9]+$/i', $name)) {
+        //    Exclut les suffixes de build/template légitimes (.in, .dist, .tmpl...)
+        //    qui ne sont PAS exécutés comme du PHP (ex. Template.php.in).
+        if (preg_match('/\.php\.(?!in$|dist$|tmpl$|tpl$|sample$|template$)[a-z0-9]+$/i', $name)) {
             $infected_files[] = [
                 'file'       => $path,
                 'line'       => null,
@@ -1217,7 +1633,7 @@ function check_suspicious_extensions($root_path, &$infected_files) {
  *
  * @return void
  */
-function check_exposed_sensitive_files($root_path, &$infected_files) {
+function check_exposed_sensitive_files($root_path, &$infected_files, $whitelist = []) {
     if (!is_dir($root_path)) return;
 
     // Fichiers/dossiers sensibles recherchés à la RACINE et dans les 2 premiers
@@ -1256,6 +1672,7 @@ function check_exposed_sensitive_files($root_path, &$infected_files) {
             if ($entry === '.' || $entry === '..') continue;
             $path = $dir . '/' . $entry;
             if (!is_file($path)) continue;
+            if (path_is_whitelisted($path, $whitelist)) continue;
 
             foreach ($sensitive as $regex => $info) {
                 if (preg_match($regex, $entry)) {
@@ -1299,7 +1716,7 @@ function check_exposed_sensitive_files($root_path, &$infected_files) {
  *
  * @return void
  */
-function check_skimmer_domains($root_path, &$infected_files, $list_path) {
+function check_skimmer_domains($root_path, &$infected_files, $list_path, $whitelist = []) {
     if (!is_dir($root_path) || !is_file($list_path) || !is_readable($list_path)) return;
 
     // Chargement de la liste noire (on ignore commentaires et lignes vides).
@@ -1325,6 +1742,7 @@ function check_skimmer_domains($root_path, &$infected_files, $list_path) {
 
         $path = $fileInfo->getPathname();
         if (preg_match('~/(var/cache|app/cache|\.git|node_modules)/~', $path)) continue;
+        if (path_is_whitelisted($path, $whitelist)) continue;
 
         // Limite de taille : inutile de charger des bundles énormes.
         $size = $fileInfo->getSize();
@@ -1358,7 +1776,7 @@ function check_skimmer_domains($root_path, &$infected_files, $list_path) {
 
 /**
  * FONCTION : check_http_security_headers()
- * 
+ *
  * OBJECTIF :
  * Effectue une requête HTTP vers la page d'accueil et vérifie la présence
  * des en-têtes de sécurité importants (HSTS, CSP, X-Frame-Options, etc.).
@@ -1501,7 +1919,7 @@ function check_http_security_headers($url, &$header_issues) {
         ],
         'strict-transport-security' => [
             'name' => 'Strict-Transport-Security',
-            'check' => function($val) { 
+            'check' => function($val) {
                 if (preg_match('/max-age=(\d+)/', $val, $m)) {
                     return $m[1] >= 2592000; // 30 jours min
                 }
@@ -1545,7 +1963,7 @@ function check_http_security_headers($url, &$header_issues) {
 
 /**
  * FONCTION : scan_root_htaccess()
- * 
+ *
  * OBJECTIF :
  * Analyse le fichier .htaccess principal à la racine pour détecter :
  * - Les redirects malveillants vers des domaines externes
@@ -1562,17 +1980,75 @@ function check_http_security_headers($url, &$header_issues) {
  * 1. RewriteRule -> URL externe : redirection malveillante
  * 2. SetHandler/AddHandler application/x-httpd-php : PHP en dossier non-code
  * 3. php_value auto_prepend_file : injection de code au démarrage
+ *
+ * Toute l'arborescence est parcourue : les attaquants cachent fréquemment leur
+ * .htaccess piégé dans img/, upload/, modules/… et non à la racine.
+ *
+ * @param array $whitelist Chemins à ignorer (faux positifs connus)
  */
-function scan_root_htaccess($root_path, &$infected_files) {
-    $htaccess_file = $root_path . '/.htaccess';
-    if (!file_exists($htaccess_file)) return;
+function scan_root_htaccess($root_path, &$infected_files, $whitelist = []) {
+    // Liste de tous les .htaccess de l'installation (racine incluse).
+    $htaccess_files = [];
 
-    $content = file_get_contents($htaccess_file);
+    try {
+        $iterator = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($root_path, FilesystemIterator::SKIP_DOTS),
+            RecursiveIteratorIterator::LEAVES_ONLY
+        );
+        foreach ($iterator as $fileInfo) {
+            if (!$fileInfo->isFile()) continue;
+            if (strcasecmp($fileInfo->getFilename(), '.htaccess') !== 0) continue;
+
+            $path  = $fileInfo->getPathname();
+            $lower = str_replace('\\', '/', strtolower($path));
+            if (strpos($lower, '/vendor/') !== false
+                || strpos($lower, '/var/cache') !== false
+                || strpos($lower, '/app/cache') !== false
+                || strpos($lower, '/node_modules/') !== false
+                || path_is_whitelisted($path, $whitelist)) {
+                continue;
+            }
+            $htaccess_files[] = $path;
+        }
+    } catch (Exception $e) {
+        // Racine illisible : on retombe sur le seul .htaccess de la racine.
+    }
+
+    if (empty($htaccess_files)) return;
+
+    foreach ($htaccess_files as $htaccess_file) {
+        scan_one_htaccess($htaccess_file, $infected_files);
+    }
+}
+
+/**
+ * Analyse UN fichier .htaccess (racine ou sous-dossier).
+ *
+ * @param string $htaccess_file   Chemin du fichier
+ * @param array  &$infected_files Tableau des résultats (modifié par référence)
+ * @return void
+ */
+function scan_one_htaccess($htaccess_file, &$infected_files) {
+    $content = @file_get_contents($htaccess_file);
     if ($content === false) return;
 
     // Patterns pour .htaccess malveillant
     $patterns = [
-        'htaccess_redirect_malware' => '/RewriteRule\s+^.*$\s+https?:\/\/[^\s]+\s+[LR]/i',
+        // Motif CORRIGÉ : l'ancienne expression /RewriteRule\s+^.*$\s+...
+        // exigeait littéralement le texte « ^.*$ » dans le fichier, elle ne
+        // matchait donc jamais une vraie redirection. On cible maintenant une
+        // règle de réécriture qui redirige vers une URL EXTERNE, quelle que soit
+        // la cible locale.
+        //
+        // Attention : quand le nom d'hôte est inconnu (ex. exécution en CLI,
+        // $_SERVER['HTTP_HOST'] absent), \Q\E vide rend l'assertion négative
+        // (?!...) TOUJOURS fausse, donc le motif ne matchait jamais. On construit
+        // le motif avec ou sans la clause d'exclusion du domaine.
+        'htaccess_redirect_malware' => (function () {
+            $own_host = $_SERVER['HTTP_HOST'] ?? '';
+            $not_own  = $own_host !== '' ? '(?![^\s]*\Q' . $own_host . '\E)' : '';
+            return '~^\s*RewriteRule\s+\S+\s+https?://' . $not_own . '[^\s]+\s*\[[^\]]*[R,L]~im';
+        })(),
         'htaccess_php_execution' => '/(SetHandler|AddHandler|AddType)\s+application\/x-httpd-php/i',
         'htaccess_php_value_prepend' => '/php_value\s+(?:auto_prepend_file|auto_append_file)/i',
         // Nouvelles vérifications demandées :
@@ -1584,7 +2060,9 @@ function scan_root_htaccess($root_path, &$infected_files) {
         'htaccess_options_execcgi' => '/Options\s+.*\+ExecCGI/i',
         // - ErrorDocument pointant vers un fichier local : backdoor fréquente
         //   (le 404 déclenche l'exécution d'un script malveillant).
-        'htaccess_errordocument_local' => '/ErrorDocument\s+\d{3}\s+\/(?!https?:)[^\s]+/i',
+        //   Exclusion : la cible 404 standard de PrestaShop
+        //   (index.php?controller=404), générée automatiquement par la boutique.
+        'htaccess_errordocument_local' => '/ErrorDocument\s+\d{3}\s+\/(?!https?:)(?!index\.php\?controller=404)[^\s]+/i',
         // - Fichiers/dossiers ajoutés à l'exécution PHP via <FilesMatch> ou <Directory>.
         'htaccess_filesmatch_php' => '/<FilesMatch[^>]*>\s*.*?x-httpd-php/i',
     ];
@@ -1608,7 +2086,122 @@ function scan_root_htaccess($root_path, &$infected_files) {
                     'start_line' => $start_line + 1,
                     'mtime'      => @filemtime($htaccess_file),
                     'severity'   => 'critical',
-                    'md5'        => md5_file($htaccess_file),
+                    'md5'        => @md5_file($htaccess_file) ?: 'N/A',
+                ];
+            }
+        }
+    }
+}
+
+/**
+ * FONCTION : scan_root_user_ini()
+ *
+ * OBJECTIF :
+ * Analyse tous les fichiers .user.ini de l'installation (racine + sous-dossiers).
+ * Le .user.ini est l'équivalent PHP-FPM / CGI du .htaccess : il peut redéfinir
+ * des directives comme auto_prepend_file et auto_append_file, qui chargent un
+ * script arbitraire au démarrage de chaque requête PHP.
+ *
+ * PARAMÈTRES :
+ * @param string $root_path       Chemin racine de PrestaShop
+ * @param array  &$infected_files Tableau des résultats (modifié par référence)
+ * @param array  $whitelist       Chemins à ignorer (faux positifs connus)
+ *
+ * @return void
+ *
+ * MENACES DÉTECTÉES :
+ * 1. auto_prepend_file / auto_append_file : injection de code au démarrage
+ * 2. Directives complémentaires (open_basedir, include_path, error_log...)
+ *
+ * Toute l'arborescence est parcourue : les attaquants cachent fréquemment leur
+ * .user.ini piégé dans img/, upload/, modules/… et non à la racine.
+ */
+function scan_root_user_ini($root_path, &$infected_files, $whitelist = []) {
+    // Liste de tous les .user.ini de l'installation (racine incluse).
+    $user_ini_files = [];
+
+    try {
+        $iterator = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($root_path, FilesystemIterator::SKIP_DOTS),
+            RecursiveIteratorIterator::LEAVES_ONLY
+        );
+        foreach ($iterator as $fileInfo) {
+            if (!$fileInfo->isFile()) continue;
+            if (strcasecmp($fileInfo->getFilename(), '.user.ini') !== 0) continue;
+
+            $path  = $fileInfo->getPathname();
+            $lower = str_replace('\\', '/', strtolower($path));
+            if (strpos($lower, '/vendor/') !== false
+                || strpos($lower, '/var/cache') !== false
+                || strpos($lower, '/app/cache') !== false
+                || strpos($lower, '/node_modules/') !== false
+                || path_is_whitelisted($path, $whitelist)) {
+                continue;
+            }
+            $user_ini_files[] = $path;
+        }
+    } catch (Exception $e) {
+        // Racine illisible : on retombe sur le seul .user.ini de la racine.
+    }
+
+    if (empty($user_ini_files)) return;
+
+    foreach ($user_ini_files as $user_ini_file) {
+        scan_one_user_ini($user_ini_file, $infected_files);
+    }
+}
+
+/**
+ * Analyse UN fichier .user.ini (racine ou sous-dossier).
+ *
+ * Ne considère PAS automatiquement toute directive auto_prepend_file /
+ * auto_append_file comme une infection : signale le fichier concerné et le
+ * chemin chargé, et laisse l'utilisateur juger.
+ *
+ * @param string $user_ini_file   Chemin du fichier
+ * @param array  &$infected_files Tableau des résultats (modifié par référence)
+ * @return void
+ */
+function scan_one_user_ini($user_ini_file, &$infected_files) {
+    $content = @file_get_contents($user_ini_file);
+    if ($content === false) return;
+
+    // Patterns pour .user.ini malveillant.
+    // Comme pour .htaccess, la simple présence de auto_prepend_file /
+    // auto_append_file est signalée (warning) : c'est le vecteur principal pour
+    // charger du code au démarrage. Les autres directives sont moins critiques.
+    $patterns = [
+        // Chargement de code au démarrage : vecteur principal.
+        'user_ini_auto_prepend' => '/auto_(?:prepend|append)_file\s*=/i',
+        // Directives complémentaires pouvant servir à détourner le contexte PHP
+        // (bac à sable, chemin d'inclusion, redirection de log).
+        'user_ini_suspicious_directive' => '/^\s*(?:open_basedir|include_path|error_log|session\.save_path|upload_tmp_dir|soap\.wsdl_cache_dir|extension_dir|allow_url_include)\s*=/im',
+    ];
+
+    $lines = explode("\n", $content);
+    $line_count = count($lines);
+
+    foreach ($patterns as $pattern_name => $pattern) {
+        if (preg_match_all($pattern, $content, $matches, PREG_OFFSET_CAPTURE)) {
+            foreach ($matches[0] as $match) {
+                $line_number = count(explode("\n", substr($content, 0, $match[1]))) - 1;
+                $start_line = max(0, $line_number - 2);
+                $end_line = min($line_count - 1, $line_number + 5);
+                $context = array_slice($lines, $start_line, $end_line - $start_line + 1);
+
+                // auto_prepend/append = vecteur de chargement de code (warning),
+                // les autres directives sont moins alarmantes (info).
+                $severity = ($pattern_name === 'user_ini_auto_prepend') ? 'warning' : 'info';
+
+                $infected_files[] = [
+                    'file'       => $user_ini_file,
+                    'line'       => $line_number + 1,
+                    'pattern'    => "ALERTE .user.ini : $pattern_name",
+                    'context'    => $context,
+                    'start_line' => $start_line + 1,
+                    'mtime'      => @filemtime($user_ini_file),
+                    'severity'   => $severity,
+                    'md5'        => @md5_file($user_ini_file) ?: 'N/A',
                 ];
             }
         }
@@ -1617,7 +2210,7 @@ function scan_root_htaccess($root_path, &$infected_files) {
 
 /**
  * FONCTION : check_prestashop_vulnerabilities()
- * 
+ *
  * OBJECTIF :
  * Détecte si la version de PrestaShop installée est connue pour avoir des failles.
  * Recommande une mise à jour si une version vulnérable est trouvée.
@@ -1672,7 +2265,7 @@ function check_prestashop_vulnerabilities($root_path, $prestashop_version, &$inf
 
 /**
  * FONCTION : get_statistics()
- * 
+ *
  * OBJECTIF :
  * Compte et retourne le nombre de détections par niveau de sévérité.
  * Utilisé pour afficher les cartes de résumé dans l'interface HTML.
@@ -1763,9 +2356,12 @@ function audit_php_configuration() {
  *
  * @return void
  */
-function check_recently_modified_files($root_path, &$infected_files, $days = 7) {
+function check_recently_modified_files($root_path, &$infected_files, $days = 7, $whitelist = [], &$file_hashes = null) {
     $threshold = time() - ($days * 86400);
-    // Zones où une modification récente est particulièrement suspecte
+    // Zones où une modification récente est particulièrement suspecte.
+    // Les noms de dossiers sont normalisés en minuscules dans $lower, donc
+    // l'extension .HTACCESS (majuscules, vu sur certains serveurs) est bien
+    // détectée. Comparaison en minuscules également plus bas.
     $watched = ['/img/', '/upload/', '/download/', '/js/', '/classes/', '/override/', '/modules/'];
     $exts    = ['php', 'js', 'htaccess'];
 
@@ -1779,11 +2375,21 @@ function check_recently_modified_files($root_path, &$infected_files, $days = 7) 
         );
         foreach ($iterator as $fileInfo) {
             if (!$fileInfo->isFile()) continue;
+            $path  = $fileInfo->getPathname();
+            $lower = str_replace('\\', '/', strtolower($path));
+
             if (!in_array(strtolower($fileInfo->getExtension()), $exts, true)) continue;
+            // Évite le bruit : caches, dépendances Composer et whitelist.
+            if (strpos($lower, '/vendor/') !== false
+                || strpos($lower, '/var/cache') !== false
+                || strpos($lower, '/app/cache') !== false
+                || strpos($lower, '/node_modules/') !== false
+                || path_is_whitelisted($path, $whitelist)) {
+                continue;
+            }
 
             $mtime = $fileInfo->getMTime();
             if ($mtime >= $threshold) {
-                $path = $fileInfo->getPathname();
                 // Évite les doublons : un même fichier ne doit être signalé qu'une fois,
                 // même s'il est atteint via plusieurs zones surveillées (ex. un module
                 // dont un sous-dossier porte un nom proche).
@@ -1805,28 +2411,49 @@ function check_recently_modified_files($root_path, &$infected_files, $days = 7) 
                     'start_line' => 1,
                     'mtime'      => $mtime,
                     'severity'   => 'warning',
-                    'md5'        => @md5_file($path) ?: 'N/A',
+                    // Réutilise le hash déjà calculé par le scan principal quand
+                    // il existe : évite un md5_file() supplémentaire par fichier.
+                    'md5'        => (is_array($file_hashes) && isset($file_hashes[$path]))
+                                    ? $file_hashes[$path]
+                                    : (@md5_file($path) ?: 'N/A'),
                 ];
             }
         }
     }
 }
 
+// Dédoublonnage de $directories : un même dossier peut y figurer plusieurs fois
+// (ajout explicite ci-dessus ET auto-découverte des dossiers non standards, ou
+// doublon de saisie). Sans cela, chaque fichier était analysé plusieurs fois et
+// chaque détection s'affichait en double dans le rapport.
+$directories = array_unique($directories);
+
 foreach ($directories as $directory) {
     scan_directory($directory, $malicious_patterns, $infected_files, $total_php_files, $whitelist, $file_hashes, $pattern_severity);
 }
 
-// Scan des modules pour détecter PHPUnit (framework de test exposé en production)
-scan_phpunit_in_modules($root_path . '/modules', $infected_files);
+// NOTE : /modules n'est PAS rescanne ici. Le dossier entier est déjà analysé
+// par la boucle ci-dessus : il est ajouté à $directories par l'auto-découverte
+// des dossiers non standards (étape « dossier d'administration renommé »), et
+// les 4 modules historiquement ciblés ne sont plus listés en dur (ils étaient
+// la cause d'un double scan et donc de détections en double dans le rapport).
+
+// Scan des modules pour détecter PHPUnit (framework de test exposé en production).
+// $whitelist transmise pour ignorer les dossiers PHPUnit situés dans les vendor/
+// de modules officiels (faux positifs) ainsi que les chemins whitelistés.
+scan_phpunit_in_modules($root_path . '/modules', $infected_files, $whitelist);
 
 // Vérification de la configuration du cache Smarty (MySQL = lenteur / risque)
 scan_smarty_config_file($root_path . '/config/smarty.config.inc.php', $infected_files);
 
-// Scan du .htaccess principal à la racine
-scan_root_htaccess($root_path, $infected_files);
+// Scan de TOUS les .htaccess de l'installation (racine + sous-dossiers)
+scan_root_htaccess($root_path, $infected_files, $whitelist);
+
+// Scan de TOUS les .user.ini de l'installation (racine + sous-dossiers)
+scan_root_user_ini($root_path, $infected_files, $whitelist);
 
 // Détection des fichiers modifiés récemment (signal de compromission)
-check_recently_modified_files($root_path, $infected_files, 7);
+check_recently_modified_files($root_path, $infected_files, 7, $whitelist, $file_hashes);
 
 // Vérification des versions vulnérables de PrestaShop
 check_prestashop_vulnerabilities($root_path, $prestashop_version, $infected_files);
@@ -1873,7 +2500,7 @@ usort($infected_files, function ($a, $b) {
 // En mode CLI, aucune interface HTML n'est générée : on affiche un rapport
 // texte, puis le script se termine. Le mode web reste totalement inchangé.
 if (PHP_SAPI === 'cli') {
-    // --- Analyse des arguments ---
+    // --- Analyse des arguments
     $cli_opts   = [];
     $cli_flags  = [];
     foreach (array_slice($argv, 1) as $arg) {
@@ -1916,7 +2543,7 @@ TXT);
     $cli_quiet = isset($cli_flags['quiet']);
     $cli_color = !isset($cli_flags['no-color']) && (function_exists('posix_isatty') ? @posix_isatty(STDOUT) : true);
 
-    // --- Sortie CSV ---
+    // --- Sortie CSV
     if ($cli_csv) {
         fputcsv(STDOUT, ['Date Scan', 'Criticité', 'Fichier', 'Dernière Modif', 'Pattern', 'Hash MD5', 'Extrait de code'], ';', '"', '\\');
         $now = date('Y-m-d H:i:s');
@@ -1934,7 +2561,7 @@ TXT);
         exit(0);
     }
 
-    // --- Sortie JSON ---
+    // --- Sortie JSON
     if ($cli_json) {
         echo json_encode([
             'scan_date'            => date('Y-m-d H:i:s'),
@@ -1950,7 +2577,7 @@ TXT);
         exit(0);
     }
 
-    // --- Sortie texte (rapport lisible) ---
+    // --- Sortie texte (rapport lisible)
     // Petites fonctions de mise en forme ANSI (désactivées si --no-color).
     $c = function ($code, $txt) use ($cli_color) {
         return $cli_color ? "\033[{$code}m{$txt}\033[0m" : $txt;
@@ -2008,14 +2635,44 @@ TXT);
 }
 
 // ============================================================================
+// JETON ANTI-CSRF POUR LES ACTIONS DESTRUCTRICES
+// ============================================================================
+// Les boutons "Corriger les permissions" et "Supprimer PHPUnit" modifient le
+// serveur. Un simple appel GET (?fix_phpunit=1) pouvait jusqu'ici être déclenché
+// à distance, par exemple via une balise <img src="...?fix_phpunit=1"> dans un
+// e-mail ou une page tierce. On exige désormais :
+//   1. une méthode POST ;
+//   2. un jeton aléatoire stocké en session et vérifié en temps constant.
+if (session_status() === PHP_SESSION_NONE && PHP_SAPI !== 'cli' && !headers_sent()) {
+    @session_start();
+}
+if (empty($_SESSION['scanner_csrf'])) {
+    $_SESSION['scanner_csrf'] = bin2hex(random_bytes(32));
+}
+$csrf_token = $_SESSION['scanner_csrf'];
+
+/**
+ * Vérifie que la requête courante est une action POST légitime (jeton valide).
+ *
+ * @param string $token Jeton attendu (celui de la session)
+ * @return bool
+ */
+function verify_csrf_action($token) {
+    if (($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'POST') return false;
+    $sent = $_POST['csrf_token'] ?? '';
+    return is_string($sent) && $sent !== '' && hash_equals($token, $sent);
+}
+
+// ============================================================================
 // CORRECTION AUTOMATIQUE DES PERMISSIONS
 // ============================================================================
-// Si l'utilisateur clique sur le bouton "Corriger les permissions", on
+// Si l'utilisateur valide le formulaire "Corriger les permissions", on
 // remet les droits propres (fichiers 0644, dossiers 0755) sur les chemins
 // détectés par le scan. Le résultat est affiché dans le rapport ci-dessous.
-// Sécurité : on ne touche QUE les chemins déjà listés par check_sensitive_permissions().
+// Sécurité : on ne touche QUE les chemins déjà listés par check_sensitive_permissions(),
+// et uniquement après vérification du jeton anti-CSRF.
 $permission_fix_report = null;
-if (isset($_GET['fix_permissions'])) {
+if (isset($_POST['fix_permissions']) && verify_csrf_action($csrf_token)) {
     $permission_fix_report = fix_detected_permissions($infected_files);
     // Après correction, on relance la détection pour rafraîchir l'affichage
     // (les entrées de permissions corrigées disparaissent du rapport).
@@ -2023,6 +2680,53 @@ if (isset($_GET['fix_permissions'])) {
         return strpos($e['pattern'] ?? '', 'PERMISSIONS') !== 0;
     }));
     check_sensitive_permissions($infected_files, $root_path);
+}
+
+// ============================================================================
+// SUPPRESSION DES RÉPERTOIRES/FICHIERS PHPUNIT DÉTECTÉS
+// ============================================================================
+// Sur demande explicite (formulaire "Supprimer PHPUnit"), on supprime les fichiers
+// et dossiers nommés exactement "phpunit" détectés dans les modules.
+// Sécurité : delete_detected_phpunit() ne travaille que sur les chemins déjà
+// listés par scan_phpunit_in_modules(), vérifie qu'ils restent dans la racine
+// analysée et que leur nom est bien "phpunit".
+$phpunit_delete_report = null;
+if (isset($_POST['fix_phpunit']) && verify_csrf_action($csrf_token)) {
+    $phpunit_delete_report = delete_detected_phpunit($infected_files, $root_path);
+    // Après suppression, on relance la détection pour rafraîchir l'affichage.
+    $infected_files = array_values(array_filter($infected_files, function ($e) {
+        return strpos($e['pattern'] ?? '', 'phpunit') === false;
+    }));
+    scan_phpunit_in_modules($root_path . '/modules', $infected_files, $whitelist);
+}
+
+// ============================================================================
+// GESTION DE LA WHITELIST DYNAMIQUE (ajout / retrait)
+// ============================================================================
+// Depuis l'interface, l'utilisateur peut envoyer un faux positif en liste
+// blanche (le chemin complet du fichier, ou son dossier parent). Les entrées
+// sont persistées dans data/whitelist.json et prises en compte au prochain scan.
+// Comme pour les autres actions, on exige une méthode POST et un jeton CSRF.
+$whitelist_action_report = null;
+if (isset($_POST['whitelist_add']) && verify_csrf_action($csrf_token)) {
+    $entry = isset($_POST['whitelist_entry']) ? trim((string) $_POST['whitelist_entry']) : '';
+    // Refuse les entrées vides ou manifestement invalides (ex. tentative de
+    // fragment générique qui viderait la liste de son sens).
+    if ($entry === '' || strlen($entry) < 3) {
+        $whitelist_action_report = ['ok' => false, 'msg' => 'Entrée invalide (trop courte).'];
+    } elseif (add_to_persistent_whitelist([$entry])) {
+        $whitelist_action_report = ['ok' => true, 'msg' => 'Ajouté à la liste blanche : ' . $entry . '. Relancez le scan pour appliquer.'];
+    } else {
+        $whitelist_action_report = ['ok' => false, 'msg' => 'Échec de l\'écriture de data/whitelist.json (droits insuffisants ?).'];
+    }
+}
+if (isset($_POST['whitelist_remove']) && verify_csrf_action($csrf_token)) {
+    $entry = isset($_POST['whitelist_entry']) ? trim((string) $_POST['whitelist_entry']) : '';
+    if ($entry !== '' && remove_from_persistent_whitelist($entry)) {
+        $whitelist_action_report = ['ok' => true, 'msg' => 'Retiré de la liste blanche : ' . $entry . '. Relancez le scan pour appliquer.'];
+    } else {
+        $whitelist_action_report = ['ok' => false, 'msg' => 'Échec du retrait de la liste blanche.'];
+    }
 }
 
 // ============================================================================
@@ -2279,8 +2983,22 @@ function group_by_file($infected_files) {
     <center><img style="width:15%" src="data:image/webp;base64,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"></center>
     </div>
     
-    <!-- Lien vers le site personnalisé de l'auteur -->
-    <center style="font-size:12px"><i><a href="https://thierrylaval.dev">Par thierrylaval.dev</a></i></center>
+    <!-- Liens de l'auteur : deux boutons colorés distincts -->
+    <div class="text-center mb-2" style="font-size:13px">
+        <a href="https://thierrylaval.dev" target="_blank" rel="noopener noreferrer"
+           class="btn btn-sm btn-primary me-2" style="--bs-btn-bg:#41A1E8;--bs-btn-border-color:#41A1E8;--bs-btn-hover-bg:#2f8fd6;--bs-btn-hover-border-color:#2f8fd6;">
+            Par thierrylaval.dev
+        </a>
+        <a href="https://thierrylaval.dev/contact/" target="_blank" rel="noopener noreferrer"
+           class="btn btn-sm btn-success">
+            ✉️ Contact
+        </a>
+        <!-- Bouton de relance du scan : simple rechargement de la page (GET),
+             sans paramètre destructeur : un nouveau scan complet est relancé. -->
+        <a href="?" class="btn btn-sm btn-warning ms-2" title="Relancer un scan complet">
+            🔄 Relancer le scan
+        </a>
+    </div>
     <br>
     <div class="card border-secondary"><div class="card-body"><center><span style="font-size:17px">Ce script permet de réaliser un audit de sécurité rapide sur un site PrestaShop en analysant automatiquement les fichiers afin de détecter ceux qui présentent des signes suspects ou des modifications anormales. Il identifie notamment les fichiers récemment modifiés, les emplacements inhabituels ou les fragments de code potentiellement malveillants. Les résultats fournis incluent des informations contextuelles comme le chemin complet, la date de modification et des éléments techniques utiles pour faciliter l’analyse. Cela permet d’orienter efficacement les vérifications et d’accélérer la prise de décision avant toute action corrective.</span></center></div></div>
     <br>
@@ -2319,7 +3037,7 @@ function group_by_file($infected_files) {
     ?>
     <hr>
     <div class="card">
-        <div class="card-header bg-primary text-white">
+        <div class="card-header text-white" style="background-color:#41A1E8;">
             Résultat du scan
         </div>
         <div class="card-body">
@@ -2340,7 +3058,75 @@ RÉSUMÉ STATISTIQUE - ONGLETS DE SÉVÉRITÉ
     - bg-danger : critique (rouge)
     - bg-warning : avertissement (orange/jaune)
     - bg-info : information (bleu clair)
+
+    Chaque onglet est coloré en permanence (y compris inactif) : le compteur et
+    le libellé reprennent la couleur de la sévérité, et l'onglet actif est
+    souligné et légèrement agrandi pour rester identifiable.
 ===================================================================== -->
+                <style>
+                    /* Barre d'onglets de sévérité : conteneur arrondi et espacé */
+                    #severityTabs {
+                        gap: .75rem;
+                        background: #f1f3f5;
+                        padding: .6rem;
+                        border-radius: .75rem;
+                    }
+                    #severityTabs .nav-item { flex: 1 1 0; }
+
+                    /* Chaque onglet : fond plein coloré, coins arrondis, ombre douce */
+                    #severityTabs .nav-link {
+                        width: 100%;
+                        border: 0;
+                        border-radius: .6rem;
+                        padding: .7rem .9rem;
+                        font-weight: 600;
+                        color: #fff;
+                        box-shadow: 0 1px 3px rgba(0,0,0,.12);
+                        transition: transform .15s ease-in-out, box-shadow .15s ease-in-out, filter .15s ease-in-out;
+                    }
+                    #severityTabs .nav-link:hover {
+                        transform: translateY(-2px);
+                        box-shadow: 0 6px 14px rgba(0,0,0,.18);
+                        filter: brightness(1.05);
+                    }
+                    /* Onglet actif : relief plus marqué + liseré intérieur */
+                    #severityTabs .nav-link.active {
+                        transform: translateY(-2px);
+                        box-shadow: 0 6px 14px rgba(0,0,0,.22), inset 0 0 0 3px rgba(255,255,255,.55);
+                        filter: none;
+                    }
+
+                    /* Rouge : issues critiques */
+                    #severityTabs .nav-link.sev-critical {
+                        background-image: linear-gradient(135deg, #f05a68 0%, #dc3545 55%, #b02a37 100%);
+                    }
+                    /* Orange : avertissements */
+                    #severityTabs .nav-link.sev-warning {
+                        background-image: linear-gradient(135deg, #ffd454 0%, #ffc107 55%, #e0a800 100%);
+                        color: #212529;
+                    }
+                    /* Bleu : informations */
+                    #severityTabs .nav-link.sev-info {
+                        background-image: linear-gradient(135deg, #4fd8f5 0%, #0dcaf0 55%, #0aa2c0 100%);
+                        color: #212529;
+                    }
+
+                    /* Compteur : pastille translucide, lisible sur chaque fond */
+                    #severityTabs .nav-link .badge {
+                        background-color: rgba(255,255,255,.85);
+                        color: #212529;
+                        font-size: .9rem;
+                        padding: .35em .6em;
+                    }
+                    #severityTabs .nav-link.sev-critical .badge { color: #b02a37; }
+                    #severityTabs .nav-link.sev-warning .badge,
+                    #severityTabs .nav-link.sev-info .badge { color: #495057; }
+
+                    /* Sur petit écran : les onglets s'empilent et restent lisibles */
+                    @media (max-width: 576px) {
+                        #severityTabs { flex-direction: column; }
+                    }
+                </style>
                 <?php
                 $stats = get_statistics($infected_files);
                 // Regroupement des fichiers par sévérité (la plus grave du fichier).
@@ -2351,10 +3137,11 @@ RÉSUMÉ STATISTIQUE - ONGLETS DE SÉVÉRITÉ
                     if (isset($groups_by_severity[$sev])) $groups_by_severity[$sev][] = $g;
                 }
                 // Métadonnées d'affichage des onglets.
+                // 'sev' porte la classe CSS qui colore l'onglet (voir <style> ci-dessus).
                 $tabs_meta = [
-                    'critical' => ['label' => 'Issues Critiques', 'badge' => 'bg-danger',  'tab' => 'tab-critical'],
-                    'warning'  => ['label' => 'Avertissements',  'badge' => 'bg-warning text-dark', 'tab' => 'tab-warning'],
-                    'info'     => ['label' => 'Informations',    'badge' => 'bg-info text-dark',    'tab' => 'tab-info'],
+                    'critical' => ['label' => 'Issues Critiques', 'badge' => 'bg-danger',  'sev' => 'sev-critical', 'tab' => 'tab-critical'],
+                    'warning'  => ['label' => 'Avertissements',  'badge' => 'bg-warning text-dark', 'sev' => 'sev-warning', 'tab' => 'tab-warning'],
+                    'info'     => ['label' => 'Informations',    'badge' => 'bg-info text-dark',    'sev' => 'sev-info',    'tab' => 'tab-info'],
                 ];
                 // Onglet actif par défaut : le plus grave qui contient des résultats.
                 $active_tab = 'critical';
@@ -2365,7 +3152,7 @@ RÉSUMÉ STATISTIQUE - ONGLETS DE SÉVÉRITÉ
                 <ul class="nav nav-pills nav-fill mb-3" id="severityTabs" role="tablist">
                     <?php foreach ($tabs_meta as $sev => $meta): ?>
                     <li class="nav-item" role="presentation">
-                        <button class="nav-link <?php echo $active_tab === $sev ? 'active' : ''; ?>"
+                        <button class="nav-link <?php echo $meta['sev']; ?> <?php echo $active_tab === $sev ? 'active' : ''; ?>"
                                 id="<?php echo $meta['tab']; ?>-tab"
                                 data-bs-toggle="tab"
                                 data-bs-target="#<?php echo $meta['tab']; ?>"
@@ -2400,10 +3187,13 @@ BOUTONS D'EXPORT DES RAPPORTS
                     }
                     if ($has_perm_issues):
                     ?>
-                    <a href="?fix_permissions=1" class="btn btn-danger"
-                       onclick="return confirm('Corriger les permissions des fichiers/dossiers signalés ?\n\nFichiers -> 0644 (rw-r--r--)\nDossiers -> 0755 (rwxr-xr-x)\n\nCette action modifie les droits sur le serveur.');">
-                        🛠️ Corriger les permissions détectées
-                    </a>
+                    <form method="post" class="d-inline"
+                          onsubmit="return confirm('Corriger les permissions des fichiers/dossiers signalés ?\n\nFichiers -> 0644 (rw-r--r--)\nDossiers -> 0755 (rwxr-xr-x)\n\nCette action modifie les droits sur le serveur.');">
+                        <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token, ENT_QUOTES, 'UTF-8'); ?>">
+                        <button type="submit" name="fix_permissions" value="1" class="btn btn-danger">
+                            🛠️ Corriger les permissions détectées
+                        </button>
+                    </form>
                     <?php endif; ?>
                 </div>
 
@@ -2484,6 +3274,16 @@ LISTE DES FICHIERS DÉTECTÉS
                                             if ($expl) {
                                                 echo '<div class="alert alert-warning mt-1 mb-1"><strong>Note :</strong> ' . htmlspecialchars($expl) . '</div>';
                                             }
+                                        } elseif (strpos($m['pattern'], '.user.ini') !== false) {
+                                            $expl = '';
+                                            if (strpos($m['pattern'], 'user_ini_auto_prepend') !== false) {
+                                                $expl = 'Ce .user.ini définit auto_prepend_file ou auto_append_file : un script est chargé au démarrage de chaque requête PHP. Vérifiez que le chemin pointé est légitime.';
+                                            } elseif (strpos($m['pattern'], 'user_ini_suspicious_directive') !== false) {
+                                                $expl = 'Ce .user.ini redéfinit une directive de contexte PHP (open_basedir, include_path, error_log...). Peut servir à contourner les restrictions du serveur.';
+                                            }
+                                            if ($expl) {
+                                                echo '<div class="alert alert-warning mt-1 mb-1"><strong>Note :</strong> ' . htmlspecialchars($expl) . '</div>';
+                                            }
                                         }
                                         ?>
                                     </li>
@@ -2495,6 +3295,36 @@ LISTE DES FICHIERS DÉTECTÉS
                             <button type="button" class="btn btn-info mt-2" data-bs-toggle="modal" data-bs-target="#modal-<?php echo $index; ?>">
                                 Informations
                             </button>
+
+                            <!-- Bouton « Envoyer en liste blanche » : permet de traiter
+                                 un faux positif depuis l'interface. Deux portées possibles :
+                                 le fichier exact, ou son dossier parent (utile pour un module
+                                 entier comme sgkmydoctor). L'entrée est persistée dans
+                                 data/whitelist.json via POST protégé CSRF. -->
+                            <form method="post" class="d-inline"
+                                  onsubmit="return confirm('Ajouter ce chemin à la liste blanche ?\nIl ne sera plus signalé aux prochains scans.');">
+                                <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token, ENT_QUOTES, 'UTF-8'); ?>">
+                                <input type="hidden" name="whitelist_entry" value="<?php echo htmlspecialchars($group['file'], ENT_QUOTES, 'UTF-8'); ?>">
+                                <button type="submit" name="whitelist_add" value="1" class="btn btn-outline-secondary mt-2">
+                                    🚫 Envoyer ce fichier en liste blanche
+                                </button>
+                            </form>
+                            <?php
+                            // Proposition du dossier parent (normalisé avec slashes
+                            // initiaux/finaux, comme les entrées statiques de la whitelist).
+                            $parent_dir = str_replace('\\', '/', dirname($group['file']));
+                            $parent_dir = rtrim($parent_dir, '/') . '/';
+                            if ($parent_dir !== '/' && $parent_dir !== $group['file']):
+                            ?>
+                            <form method="post" class="d-inline"
+                                  onsubmit="return confirm('Ajouter ce dossier entier à la liste blanche ?\nTous les fichiers qu\'il contient seront ignorés.');">
+                                <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token, ENT_QUOTES, 'UTF-8'); ?>">
+                                <input type="hidden" name="whitelist_entry" value="<?php echo htmlspecialchars($parent_dir, ENT_QUOTES, 'UTF-8'); ?>">
+                                <button type="submit" name="whitelist_add" value="1" class="btn btn-outline-secondary mt-2">
+                                    🚫 Envoyer le dossier en liste blanche
+                                </button>
+                            </form>
+                            <?php endif; ?>
 
 <!-- =====================================================================
 MODAL de détails - Affichage du contexte du fichier
@@ -2534,6 +3364,68 @@ MODAL de détails - Affichage du contexte du fichier
                 </div>
                 <?php endforeach; // foreach des onglets (sévérités) ?>
                 </div><!-- /.tab-content -->
+
+<!-- =====================================================================
+    PANNEAU LISTE BLANCHE (whitelist dynamique persistante)
+=====================================================================
+    Affiche les entrées ajoutées depuis l'interface (data/whitelist.json),
+    avec la possibilité de les retirer. La whitelist statique codée en dur
+    n'est PAS listée ici (elle n'est pas modifiable depuis l'interface).
+===================================================================== -->
+                <?php $current_persistent_whitelist = load_persistent_whitelist(); ?>
+                <div class="card mt-4 border-secondary">
+                    <div class="card-header bg-secondary text-white d-flex justify-content-between align-items-center">
+                        <span>🚫 Liste blanche (faux positifs ignorés)</span>
+                        <span class="badge bg-light text-dark"><?php echo count($current_persistent_whitelist); ?> entrée<?php echo count($current_persistent_whitelist) > 1 ? 's' : ''; ?></span>
+                    </div>
+                    <div class="card-body">
+                        <p class="text-muted mb-2" style="font-size:.9rem">
+                            Ces chemins sont ignorés lors des scans. Chaque entrée est un fragment de chemin
+                            (ex. <code>sgkmydoctor/classes/</code> ou <code>/modules/monmodule/</code>).
+                            Vous pouvez ajouter une entrée depuis n'importe quelle alerte via le bouton
+                            « Envoyer en liste blanche ».
+                        </p>
+                        <?php if (empty($current_persistent_whitelist)): ?>
+                            <div class="alert alert-light border mb-0">Aucune entrée dans la liste blanche dynamique.</div>
+                        <?php else: ?>
+                            <ul class="list-group">
+                            <?php foreach ($current_persistent_whitelist as $wh_entry): ?>
+                                <li class="list-group-item d-flex justify-content-between align-items-center">
+                                    <code><?php echo htmlspecialchars($wh_entry); ?></code>
+                                    <form method="post" class="mb-0"
+                                          onsubmit="return confirm('Retirer ce chemin de la liste blanche ?\nIl sera de nouveau signalé aux prochains scans.');">
+                                        <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token, ENT_QUOTES, 'UTF-8'); ?>">
+                                        <input type="hidden" name="whitelist_entry" value="<?php echo htmlspecialchars($wh_entry, ENT_QUOTES, 'UTF-8'); ?>">
+                                        <button type="submit" name="whitelist_remove" value="1" class="btn btn-sm btn-outline-danger">
+                                            ✖️ Retirer
+                                        </button>
+                                    </form>
+                                </li>
+                            <?php endforeach; ?>
+                            </ul>
+                        <?php endif; ?>
+
+                        <!-- Formulaire d'ajout manuel -->
+                        <form method="post" class="row g-2 mt-3">
+                            <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token, ENT_QUOTES, 'UTF-8'); ?>">
+                            <div class="col-sm-9">
+                                <input type="text" name="whitelist_entry" class="form-control"
+                                       placeholder="Chemin ou fragment à ignorer (ex. /modules/monmodule/)" required minlength="3">
+                            </div>
+                            <div class="col-sm-3 d-grid">
+                                <button type="submit" name="whitelist_add" value="1" class="btn btn-secondary">
+                                    ➕ Ajouter
+                                </button>
+                            </div>
+                        </form>
+
+                        <?php if ($whitelist_action_report !== null): ?>
+                            <div class="alert alert-<?php echo $whitelist_action_report['ok'] ? 'success' : 'danger'; ?> mt-3 mb-0">
+                                <?php echo htmlspecialchars($whitelist_action_report['msg']); ?>
+                            </div>
+                        <?php endif; ?>
+                    </div>
+                </div>
             <?php else: ?>
                 <!-- Cas où aucun fichier infecté n'a été trouvé -->
                 <div class="alert alert-success" role="alert">
@@ -2617,6 +3509,37 @@ MODAL de détails - Affichage du contexte du fichier
     <?php endif; ?>
 
 <!-- =====================================================================
+    RAPPORT DE SUPPRESSION DES MODULES PHPUNIT
+    =====================================================================
+    Affiché après un clic sur "Supprimer les fichiers/dossiers PHPUnit".
+    Placé HORS de la carte de résultats pour rester visible même si toutes
+    les détections PHPUnit ont été supprimées (la liste peut alors être vide).
+===================================================================== -->
+    <?php if ($phpunit_delete_report !== null): ?>
+    <div class="card mt-4 border-<?php echo empty($phpunit_delete_report['fail']) ? 'success' : 'warning'; ?>">
+        <div class="card-header bg-<?php echo empty($phpunit_delete_report['fail']) ? 'success' : 'warning'; ?> text-<?php echo empty($phpunit_delete_report['fail']) ? 'white' : 'dark'; ?>">
+            🗑️ Rapport de suppression PHPUnit
+        </div>
+        <div class="card-body">
+            <ul class="mb-0">
+                <?php foreach ($phpunit_delete_report['ok'] as $ok): ?>
+                <li>✅ <code><?php echo htmlspecialchars($ok[0]); ?></code> — <?php echo htmlspecialchars($ok[1]); ?></li>
+                <?php endforeach; ?>
+                <?php foreach ($phpunit_delete_report['fail'] as $fail): ?>
+                <li>❌ <code><?php echo htmlspecialchars($fail[0]); ?></code> — <?php echo htmlspecialchars($fail[1]); ?></li>
+                <?php endforeach; ?>
+                <?php if (empty($phpunit_delete_report['ok']) && empty($phpunit_delete_report['fail'])): ?>
+                <li>Aucun fichier/dossier PHPUnit à supprimer.</li>
+                <?php endif; ?>
+            </ul>
+            <?php if (!empty($phpunit_delete_report['fail'])): ?>
+            <p class="mt-2 mb-0"><strong>Note :</strong> un échec vient souvent d'un hébergement mutualisé qui restreint la suppression ou d'un fichier verrouillé. Supprimez ces éléments manuellement via FTP/SSH.</p>
+            <?php endif; ?>
+        </div>
+    </div>
+    <?php endif; ?>
+
+<!-- =====================================================================
     SECTION DÉTECTION DES MODULES PHPUNIT
     =====================================================================
     Affiche les répertoires ou fichiers PHPUnit détectés dans les modules.
@@ -2642,6 +3565,19 @@ MODAL de détails - Affichage du contexte du fichier
                 </li>
                 <?php endforeach; ?>
             </ul>
+            <div class="mt-3">
+                <form method="post" class="d-inline"
+                      onsubmit="return confirm('Supprimer définitivement les fichiers/dossiers \"phpunit\" listés ci-dessus ?\n\nCette action est IRRÉVERSIBLE : les fichiers seront effacés du serveur.\n\nVérifiez au préalable qu\'aucun de ces éléments n\'est utilisé par un module en production.');">
+                    <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token, ENT_QUOTES, 'UTF-8'); ?>">
+                    <button type="submit" name="fix_phpunit" value="1" class="btn btn-danger">
+                        🗑️ Supprimer les fichiers/dossiers PHPUnit détectés
+                    </button>
+                </form>
+                <p class="mt-2 mb-0" style="font-size:12px;">
+                    <strong>À vérifier avant de supprimer :</strong> PHPUnit ne doit jamais être présent en production,
+                    mais assurez-vous qu\'aucun module actif n\'en dépend. En cas de doute, sauvegardez d\'abord le dossier concerné.
+                </p>
+            </div>
         </div>
     </div>
     <?php endif; ?>
@@ -2652,7 +3588,7 @@ MODAL de détails - Affichage du contexte du fichier
     Affiche les résultats de la vérification des en-têtes de sécurité HTTP
     avec tableau de synthèse et recommandations de correction.
 ===================================================================== -->
-    <?php 
+    <?php
     // Définir les recommandations pour chaque en-tête
     $header_recommendations = [
         'Strict-Transport-Security' => 'max-age=31536000; includeSubDomains',
@@ -2802,15 +3738,15 @@ MODAL de détails - Affichage du contexte du fichier
                             'details' => 'Empêche un attaquant d\'exécuter du code shell. Au minimum : exec, shell_exec.'
                         ],
                     ];
-                    
+
                     foreach ($php_directives as $directive => $info) {
                         $current = ini_get($directive);
                         $raw_current = $current;
                         if ($current === false) { $current = '(non défini)'; }
-                        
+
                         // Déterminer la valeur recommandée et le statut
                         $recommended = '';
-                        if ($directive === 'allow_url_fopen' || $directive === 'allow_url_include' || 
+                        if ($directive === 'allow_url_fopen' || $directive === 'allow_url_include' ||
                             $directive === 'expose_php' || $directive === 'display_errors') {
                             $recommended = 'Off';
                             $status = (strtolower($raw_current) === 'off' || $raw_current === '' || $raw_current === '0') ? '✅' : '❌';
@@ -2850,11 +3786,12 @@ MODAL de détails - Affichage du contexte du fichier
     sur la sécurité du site. Cette section n'apparaît que si un domaine valide
     est détecté (présent dans $_SERVER['HTTP_HOST']).
 
-    Les deux services sont 100% gratuits et ne nécessitent ni compte ni clé API :
+    Les services sont 100% gratuits et ne nécessitent ni compte ni clé API :
     - Sucuri SiteCheck : réputation du domaine, malwares connus
     - urlscan.io        : analyse live dans un navigateur, requêtes sortantes
+    - VirusTotal        : verdict agrégé de dizaines de moteurs antivirus/URL
 ===================================================================== -->
-    <?php if (!empty($sucuriUrl) || !empty($urlscanUrl)): ?>
+    <?php if (!empty($sucuriUrl) || !empty($urlscanUrl) || !empty($virusTotalUrl)): ?>
     <div class="card mt-4">
         <div class="card-header">
             🦠 Scans externes gratuits (seconde opinion)
@@ -2875,6 +3812,12 @@ MODAL de détails - Affichage du contexte du fichier
                 🔎 Analyser avec urlscan.io
             </a>
             <?php endif; ?>
+            <?php if (!empty($virusTotalUrl)): ?>
+            <!-- Lien externe vers VirusTotal (100% gratuit, consultation sans compte) -->
+            <a class="btn btn-outline-danger" href="<?php echo htmlspecialchars($virusTotalUrl, ENT_QUOTES, 'UTF-8'); ?>" target="_blank" rel="noopener noreferrer">
+                🧪 Analyser avec VirusTotal
+            </a>
+            <?php endif; ?>
         </div>
     </div>
     <?php endif; ?>
@@ -2887,46 +3830,166 @@ MODAL de détails - Affichage du contexte du fichier
 <!-- =====================================================================
     CARTOUCHE EXPLICATIF FINAL - CONSEILS ET VÉRIFICATIONS
 ===================================================================== -->
+<style>
+    /* --- Cartouche « Conseils de vérification » : style moderne --- */
+    .tips-card {
+        border: 0;
+        border-radius: 1rem;
+        overflow: hidden;
+        box-shadow: 0 10px 30px rgba(0,0,0,.12);
+    }
+    .tips-head {
+        background-image: linear-gradient(135deg, #1f2937 0%, #374151 50%, #4b5563 100%);
+        color: #fff;
+        padding: 1.1rem 1.25rem;
+        display: flex;
+        align-items: center;
+        gap: .75rem;
+        font-size: 1.15rem;
+        font-weight: 700;
+        letter-spacing: .01em;
+    }
+    .tips-head .tips-ico {
+        width: 2.4rem; height: 2.4rem;
+        display: inline-flex; align-items: center; justify-content: center;
+        background: rgba(255,255,255,.15);
+        border-radius: .7rem;
+        font-size: 1.3rem;
+    }
+    .tips-intro {
+        background: #eef2ff;
+        border-left: 5px solid #6366f1;
+        border-radius: .6rem;
+        padding: .9rem 1rem;
+        margin-bottom: 1.4rem;
+        color: #312e81;
+    }
+    .tips-section-title {
+        display: flex; align-items: center; gap: .55rem;
+        font-size: 1.05rem; font-weight: 700; color: #1f2937;
+        margin: 1.6rem 0 .9rem;
+    }
+    .tips-section-title::before {
+        content: "";
+        width: .35rem; height: 1.35rem;
+        border-radius: .25rem;
+        background-image: linear-gradient(180deg, #6366f1, #0dcaf0);
+    }
+    /* Grille de cartes pour les vérifications */
+    .tips-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+        gap: .9rem;
+        list-style: none;
+        padding: 0; margin: 0;
+    }
+    .tips-item {
+        background: #fff;
+        border: 1px solid #e5e7eb;
+        border-left: 5px solid #6366f1;
+        border-radius: .75rem;
+        padding: .85rem 1rem;
+        transition: transform .15s ease-in-out, box-shadow .15s ease-in-out;
+    }
+    .tips-item:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 8px 20px rgba(0,0,0,.10);
+    }
+    .tips-item > strong { color: #111827; }
+    /* Variantes de couleur par thème */
+    .tips-item.t-integrite { border-left-color: #6366f1; background: #f5f7ff; }
+    .tips-item.t-fichiers  { border-left-color: #0dcaf0; background: #f2fbfe; }
+    .tips-item.t-code      { border-left-color: #dc3545; background: #fdf3f4; }
+    .tips-item.t-droits    { border-left-color: #ffc107; background: #fffdf2; }
+    .tips-item.t-config    { border-left-color: #8b5cf6; background: #f9f5ff; }
+    .tips-item.t-systeme   { border-left-color: #10b981; background: #f2fdf9; }
+    .tips-item.t-db        { border-left-color: #f97316; background: #fff7f0; }
+    /* Bloc « procédure » numéroté */
+    .tips-steps { counter-reset: tipstep; list-style: none; padding: 0; margin: 0; }
+    .tips-steps > li {
+        position: relative;
+        padding: .7rem .9rem .7rem 3rem;
+        margin-bottom: .6rem;
+        background: #f8f9fa;
+        border: 1px solid #e5e7eb;
+        border-radius: .7rem;
+    }
+    .tips-steps > li::before {
+        counter-increment: tipstep;
+        content: counter(tipstep);
+        position: absolute; left: .7rem; top: .65rem;
+        width: 1.7rem; height: 1.7rem;
+        display: inline-flex; align-items: center; justify-content: center;
+        border-radius: 50%;
+        background-image: linear-gradient(135deg, #dc3545, #b02a37);
+        color: #fff; font-weight: 700; font-size: .85rem;
+    }
+    .tips-steps > li:last-child { margin-bottom: 0; }
+    /* Bloc avertissement final */
+    .tips-warn {
+        background: #fffbea;
+        border: 1px solid #ffe08a;
+        border-left: 5px solid #ff9900;
+        border-radius: .7rem;
+        padding: 1rem;
+    }
+    .tips-warn ul { margin-bottom: 0; }
+    /* Code dans les cartes : plus lisible */
+    .tips-item pre, .tips-item code { font-size: .82rem; }
+    .tips-item pre {
+        background: #0f172a; color: #e2e8f0;
+        border-radius: .5rem; padding: .7rem .8rem;
+        overflow-x: auto; margin: .6rem 0 0;
+        white-space: pre-wrap; word-break: break-word;
+    }
+    .tips-item pre code { color: #e2e8f0; background: transparent; white-space: pre-wrap; word-break: break-word; }
+</style>
 <div class="container mt-4 mb-5">
-    <div class="card border-secondary">
-        <div class="card-header bg-light">
-            ⚠️ Conseils de vérification après scan
+    <div class="card tips-card">
+        <div class="tips-head">
+            <span class="tips-ico">⚠️</span>
+            Conseils de vérification après scan
         </div>
-        <div class="card-body">
-            <p>Rien ne garantit qu’un scan détecte 100% des menaces. Voici les vérifications complémentaires à effectuer et les bonnes pratiques en cas de suspicion :</p>
-            <ul>
-                <li><strong>Comparer l’intégrité :</strong> comparez les hash (MD5/SHA) des fichiers avec une copie propre de la même version de PrestaShop.</li>
-                <li><strong>Fichiers récents :</strong> listez les fichiers modifiés récemment. <code>-mtime</code> raisonne en jours entiers (24h glissantes) et <strong>excluez les dossiers de cache/logs</strong> qui changent en permanence, sinon la liste est noyée de faux résultats :
+        <div class="card-body p-4">
+            <div class="tips-intro">
+                <strong>Rien ne garantit qu’un scan détecte 100 % des menaces.</strong>
+                Voici les vérifications complémentaires à effectuer et les bonnes pratiques en cas de suspicion.
+            </div>
+
+            <div class="tips-section-title">🔍 Vérifications complémentaires</div>
+            <ul class="tips-grid">
+                <li class="tips-item t-integrite"><strong>🧾 Comparer l’intégrité :</strong> comparez les hash (MD5/SHA) des fichiers avec une copie propre de la même version de PrestaShop.</li>
+                <li class="tips-item t-fichiers"><strong>🕒 Fichiers récents :</strong> listez les fichiers modifiés récemment. <code>-mtime</code> raisonne en jours entiers (24h glissantes) et <strong>excluez les dossiers de cache/logs</strong> qui changent en permanence, sinon la liste est noyée de faux résultats :
                     <pre><code>find /chemin/vers/site -type f -mtime -30 -print \
   -not -path "*/var/cache/*" -not -path "*/var/logs/*" -not -path "*/img/tmp/*"</code></pre>
                 </li>
-                <li><strong>PHP dans uploads :</strong> vérifiez qu’aucun fichier PHP ne se trouve dans les répertoires d’upload publics.</li>
-                <li><strong>Extensions trompeuses :</strong> cherchez les fichiers PHP déguisés — double extension (<code>.php.jpg</code>), variantes (<code>.php5</code>, <code>.php7</code>, <code>.phtml</code>, <code>.phar</code>) — fréquemment utilisées pour contourner les filtres :
+                <li class="tips-item t-code"><strong>🐘 PHP dans uploads :</strong> vérifiez qu’aucun fichier PHP ne se trouve dans les répertoires d’upload publics.</li>
+                <li class="tips-item t-code"><strong>🎭 Extensions trompeuses :</strong> cherchez les fichiers PHP déguisés — double extension (<code>.php.jpg</code>), variantes (<code>.php5</code>, <code>.php7</code>, <code>.phtml</code>, <code>.phar</code>) — fréquemment utilisées pour contourner les filtres :
                     <pre><code>find /chemin/vers/site -type f \( -name "*.php.*" -o -name "*.phtml" -o -name "*.phar" -o -name "*.php[0-9]" \)</code></pre>
                 </li>
-                <li><strong>Droits et permissions :</strong> détectez les fichiers world‑writable. <em>Syntaxe GNU/Linux</em> (serveur) :
+                <li class="tips-item t-droits"><strong>🔑 Droits et permissions :</strong> détectez les fichiers world‑writable. <em>Syntaxe GNU/Linux</em> (serveur) :
                     <pre><code>find /chemin/vers/site -type f -perm /o+w -ls</code></pre>
                     <em>Sur macOS/BSD</em>, le préfixe est <code>+</code> et non <code>/</code> : <code>find ... -perm +o+w</code>.
                 </li>
-                <li><strong>.htaccess :</strong> recherchez les directives suspectes : <code>auto_prepend_file</code>, <code>auto_append_file</code>, <code>AddHandler</code>, <code>SetHandler</code>, <code>RewriteRule</code>, <code>&lt;FilesMatch&gt;</code>, <code>AddType</code> — mais aussi <strong><code>ErrorDocument</code></strong> (ex. <code>ErrorDocument 404 /malveillant.php</code>), vecteur de backdoor très courant et souvent oublié.</li>
-                <li><strong>.user.ini :</strong> équivalent PHP-FPM du <code>.htaccess</code>, à vérifier au même titre (il peut redéfinir <code>auto_prepend_file</code>). Souvent oublié dans les audits.</li>
-                <li><strong>Crons :</strong> vérifiez les tâches planifiées pour des exécutions inattendues (<code>crontab -l</code> et crontabs des comptes système), ainsi que les tâches ponctuelles avec <code>atq</code>.</li>
-                <li><strong>Processus &amp; connexions :</strong> surveillez les processus PHP/serveur et connexions réseau inhabituelles (ex. <code>ps aux</code>, <code>ss -tup</code>).</li>
-                <li><strong>Logs :</strong> analysez <code>error_log</code>, <code>access_log</code> et les logs d’application autour des dates suspectes.</li>
-                <li><strong>Base de données :</strong> au‑delà des comptes admin inconnus, vérifiez surtout :
+                <li class="tips-item t-config"><strong>📄 .htaccess :</strong> recherchez les directives suspectes : <code>auto_prepend_file</code>, <code>auto_append_file</code>, <code>AddHandler</code>, <code>SetHandler</code>, <code>RewriteRule</code>, <code>&lt;FilesMatch&gt;</code>, <code>AddType</code> — mais aussi <strong><code>ErrorDocument</code></strong> (ex. <code>ErrorDocument 404 /malveillant.php</code>), vecteur de backdoor très courant et souvent oublié.</li>
+                <li class="tips-item t-config"><strong>⚙️ .user.ini :</strong> équivalent PHP-FPM du <code>.htaccess</code>, à vérifier au même titre (il peut redéfinir <code>auto_prepend_file</code>). Souvent oublié dans les audits.</li>
+                <li class="tips-item t-systeme"><strong>⏰ Crons :</strong> vérifiez les tâches planifiées pour des exécutions inattendues (<code>crontab -l</code> et crontabs des comptes système), ainsi que les tâches ponctuelles avec <code>atq</code>.</li>
+                <li class="tips-item t-systeme"><strong>📡 Processus &amp; connexions :</strong> surveillez les processus PHP/serveur et connexions réseau inhabituelles (ex. <code>ps aux</code>, <code>ss -tup</code>).</li>
+                <li class="tips-item t-systeme"><strong>📜 Logs :</strong> analysez <code>error_log</code>, <code>access_log</code> et les logs d’application autour des dates suspectes.</li>
+                <li class="tips-item t-db"><strong>🗄️ Base de données :</strong> au‑delà des comptes admin inconnus, vérifiez surtout :
                     <ul>
                         <li><code>ps_configuration</code> : valeurs contenant du <strong>code JS/iframe injecté</strong> (les skimmers « stockés » en base sont invisibles dans les fichiers) ;</li>
                         <li><code>ps_employee</code> : comptes admin inconnus, comptes désactivés, dates de dernière modification de mot de passe (<code>last_passwd_gen</code>) ;</li>
                         <li><code>ps_module</code> / <code>ps_hook_module</code> : modules fantômes ou greffés sur des hooks inattendus.</li>
                     </ul>
                 </li>
-                <li><strong>Backups exposés :</strong> vérifiez qu’aucun fichier de sauvegarde (<code>*.sql</code>, <code>*.zip</code>, <code>*.tar.gz</code>, <code>*.bak</code>) n’est accessible en HTTP.</li>
-                <li><strong>Modules exposés :</strong> supprimez PHPUnit, outils de dev ou autres consoles présentes en production.</li>
-                <li><strong>Scan externe / antivirus :</strong> lancez un scan Sucuri/urlscan.io/antivirus pour une seconde opinion.</li>
+                <li class="tips-item t-droits"><strong>💾 Backups exposés :</strong> vérifiez qu’aucun fichier de sauvegarde (<code>*.sql</code>, <code>*.zip</code>, <code>*.tar.gz</code>, <code>*.bak</code>) n’est accessible en HTTP.</li>
+                <li class="tips-item t-droits"><strong>🧩 Modules exposés :</strong> supprimez PHPUnit, outils de dev ou autres consoles présentes en production.</li>
+                <li class="tips-item t-integrite"><strong>🦠 Scan externe / antivirus :</strong> lancez un scan Sucuri/urlscan.io/antivirus pour une seconde opinion.</li>
             </ul>
 
-            <h6>Procédure si compromission suspectée</h6>
-            <ol>
+            <div class="tips-section-title">🚨 Procédure si compromission suspectée</div>
+            <ol class="tips-steps">
                 <li>Isoler la plateforme (mode maintenance / couper l’accès public).</li>
                 <li>Prendre un snapshot + sauvegarde complète (fichiers + base).</li>
                 <li><strong>Identifier et corriger l’origine</strong> (module vulnérable, compte compromis, faille d’injection). C’est l’étape prioritaire : sans elle, l’attaquant revient.</li>
@@ -2935,18 +3998,25 @@ MODAL de détails - Affichage du contexte du fichier
                 <li>Vérifier que la remise en production est propre (re‑scanner, tester), puis surveiller les logs.</li>
             </ol>
 
-            <hr>
-            <h6>⚙️ Avertissement spécifique — Audit de la Configuration PHP</h6>
-            <p>Les recommandations affichées dans la section <strong>Audit de la Configuration PHP</strong> renforcent la sécurité, mais certaines valeurs peuvent impacter des fonctionnalités légitimes (PDF, conversions, intégrations externes, sessions). Avant toute modification :</p>
-            <ul>
-                <li>Sauvegardez le <code>php.ini</code> et les configurations de pool PHP-FPM.</li>
-                <li>Testez chaque changement dans un environnement de staging identique.</li>
-                <li>Appliquez les modifications progressivement et surveillez les logs (PHP/Apache/Nginx).</li>
-                <li>Pour <code>session.cookie_secure</code>, n’activez que si le site est en HTTPS.</li>
-                <li>Pour <code>open_basedir</code>, notez qu’il est <strong>souvent déjà restreint par l’hébergeur</strong> (surtout en mutualisé) : inutile de le redéfinir vous‑même si c’est le cas.</li>
-                <li>Pour <code>disable_functions</code>, veillez à inclure tous les chemins/fonctions nécessaires aux modules utilisés : désactiver <code>exec</code> peut casser des modules légitimes (génération PDF, traitement d’images).</li>
-            </ul>
-            <p><strong>En cas de doute :</strong> ne changez rien en production sans test ; contactez votre hébergeur ou un prestataire sécurité.</p>
+            <div class="tips-section-title">⚙️ Avertissement spécifique — Audit de la Configuration PHP</div>
+            <div class="tips-warn">
+                <p>Les recommandations affichées dans la section <strong>Audit de la Configuration PHP</strong> renforcent la sécurité, mais certaines valeurs peuvent impacter des fonctionnalités légitimes (PDF, conversions, intégrations externes, sessions). Avant toute modification :</p>
+                <ul>
+                    <li>Sauvegardez le <code>php.ini</code> et les configurations de pool PHP-FPM.</li>
+                    <li>Testez chaque changement dans un environnement de staging identique.</li>
+                    <li>Appliquez les modifications progressivement et surveillez les logs (PHP/Apache/Nginx).</li>
+                    <li>Pour <code>session.cookie_secure</code>, n’activez que si le site est en HTTPS.</li>
+                    <li>Pour <code>open_basedir</code>, notez qu’il est <strong>souvent déjà restreint par l’hébergeur</strong> (surtout en mutualisé) : inutile de le redéfinir vous‑même si c’est le cas.</li>
+                    <li>Pour <code>disable_functions</code>, veillez à inclure tous les chemins/fonctions nécessaires aux modules utilisés : désactiver <code>exec</code> peut casser des modules légitimes (génération PDF, traitement d’images).</li>
+                </ul>
+                <p class="mb-0"><strong>En cas de doute :</strong> ne changez rien en production sans test ; contactez votre hébergeur ou un prestataire sécurité.</p>
+                <div class="mt-3">
+                    <a class="btn text-white" href="https://thierrylaval.dev/contact/" target="_blank" rel="noopener noreferrer"
+                       style="--bs-btn-bg:#41A1E8;--bs-btn-border-color:#41A1E8;--bs-btn-hover-bg:#2f8fd6;--bs-btn-hover-border-color:#2f8fd6;">
+                        ✉️ Demander conseil / me contacter
+                    </a>
+                </div>
+            </div>
         </div>
     </div>
 </div>
