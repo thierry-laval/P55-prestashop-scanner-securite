@@ -60,8 +60,6 @@ Le projet est regroupé dans `scanner.php`. La liste noire de domaines de skimme
 
 > ℹ️ **Périmètre du scan :** le scanner analyse toute l’arborescence PrestaShop, à l’exception volontaire des caches (`var/cache`, `app/cache`), des dépendances Composer (`vendor/`, `node_modules`) et du dossier du scanner lui-même. Les sous-dossiers `vendor/smarty/smarty/libs` et `vendor/doctrine/cache`, listés comme critiques, restent analysés.
 
-</details>
-
 <details>
 <summary><h3>✨ Fonctionnalités</h3></summary>
 
@@ -761,6 +759,8 @@ La version PHP active, les permissions système, les journaux, les règles serve
 - [x] Scans externes gratuits (Sucuri, urlscan.io, securityheaders.com, VirusTotal)
 - [ ] Historique des derniers audits (localStorage)
 - [ ] Détection des injections dans la base de données (`ps_configuration`, `ps_hook_module`)
+
+</details>
 
 </details>
 
