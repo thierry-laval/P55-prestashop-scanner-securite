@@ -599,7 +599,7 @@ Chaque détection inclut le **chemin complet**, le **numéro de ligne**, un **ex
 <details>
   <summary><h2>🦠 Scans externes gratuits</h2></summary>
 
-Le rapport propose des liens vers quatre services **100 % gratuits**, sans compte ni clé API, pour une seconde opinion :
+Le rapport propose des liens vers quatre services **100 % gratuits**, sans compte ni clé API :
 
 * **[Sucuri SiteCheck](https://sitecheck.sucuri.net/)** — réputation du domaine, malwares connus, listes noires.
 * **[urlscan.io](https://urlscan.io/)** — analyse de la page en direct dans un navigateur, requêtes sortantes, scripts injectés.
