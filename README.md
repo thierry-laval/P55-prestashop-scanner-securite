@@ -20,7 +20,7 @@ _`Début du projet le 30/09/2025`_
 ![PrestaShop Security Scanner](img/prestashop-security-scanner.jpg)
 
 <details>
-  <summary><h2>Table des matières</h2></summary>
+  <summary><h3>Table des matières</h3></summary>
   <ol>
     <li><a href="#à-propos-du-projet">À propos du projet</a></li>
     <li><a href="#fonctionnalités">Fonctionnalités</a></li>
@@ -60,7 +60,7 @@ _`Début du projet le 30/09/2025`_
 <a id="à-propos-du-projet"></a>
 
 <details>
-  <summary><h2>📖 À propos du projet</h2></summary>
+  <summary><h3>📖 À propos du projet</h3></summary>
 
 **PrestaShop Security Scanner** est un script PHP monofichier qui effectue un audit de sécurité sur une installation PrestaShop. Il analyse récursivement les fichiers afin de détecter ceux qui présentent des signes suspects ou des modifications anormales, puis vérifie plusieurs aspects de la configuration du serveur : permissions dangereuses, en-têtes HTTP de sécurité, directives PHP sensibles, extensions requises, `.htaccess` racine et version de PrestaShop.
 
@@ -84,7 +84,7 @@ Le projet est regroupé dans `scanner.php`. La liste noire de domaines de skimme
 <a id="fonctionnalités"></a>
 
 <details>
-  <summary><h2>✨ Fonctionnalités</h2></summary>
+  <summary><h3>✨ Fonctionnalités</h3></summary>
 
 * **Scan récursif** des répertoires critiques (`classes`, `modules`, `themes`, `override`, `img`, `upload`, `js`, `pdf`, `mails`, `bin`, `tools`, `download`, `app`, `src`…).
 * **Plus de 150 motifs malveillants** : backdoors, web shells (`c99`, `r57`, `wso`, `alfa`, `blm`…), skimmers de carte bancaire (Magecart), code obfusqué (`base64_decode`, `eval`, `gzinflate`, `chr`, XOR, hex), injections de superglobales, exécution de commandes (`shell_exec`, `passthru`, `proc_open`)…
@@ -115,7 +115,7 @@ Rien ne garantit qu’un scan détecte 100 % des menaces : le script **oriente**
 <a id="prérequis"></a>
 
 <details>
-  <summary><h2>🧰 Prérequis</h2></summary>
+  <summary><h3>🧰 Prérequis</h3></summary>
 
 ### PHP
 
@@ -149,7 +149,7 @@ La version PHP exacte de l’hébergement n’est pas inscrite dans le projet : 
 <a id="installation"></a>
 
 <details>
-  <summary><h2>🚀 Installation</h2></summary>
+  <summary><h3>🚀 Installation</h3></summary>
 
 ### 1. Placer le fichier
 
@@ -195,7 +195,7 @@ Si aucun marqueur n’est trouvé, le script utilise son propre dossier et affic
 <a id="configuration"></a>
 
 <details>
-  <summary><h2>⚙️ Configuration</h2></summary>
+  <summary><h3>⚙️ Configuration</h3></summary>
 
 Il n’existe ni fichier `.env`, ni compte administrateur, ni base de données à configurer. Les principaux réglages sont **en tête de `scanner.php`** :
 
@@ -216,7 +216,7 @@ Le fichier `data/skimmer-domains.txt` est fourni à titre indicatif et n’est *
 <a id="liste-blanche"></a>
 
 <details>
-  <summary><h2>🚫 Liste blanche (faux positifs)</h2></summary>
+  <summary><h3>🚫 Liste blanche (faux positifs)</h3></summary>
 
 Le scanner est livré avec une **whitelist statique** codée en dur dans `scanner.php` (dépendances Composer, bundles d’admin, binaires `.phar` d’outils de dev, modules de sécurité légitimes comme `sgkmydoctor`, bundles JS d’Elementor…). Ces entrées neutralisent les faux positifs connus à l’avance.
 
@@ -248,7 +248,7 @@ Ajoutez un fragment de chemin au tableau `$whitelist` en tête de `scanner.php` 
 <a id="données-stockées"></a>
 
 <details>
-  <summary><h2>💾 Données stockées</h2></summary>
+  <summary><h3>💾 Données stockées</h3></summary>
 
 L’application **ne stocke aucune donnée de façon persistante**. Il n’y a ni base de données, ni fichier de configuration, ni cache applicatif, ni journal applicatif.
 
@@ -268,7 +268,7 @@ Les exports sont écrits **directement dans le flux de sortie** (`php://output` 
 <a id="emplacement-des-données"></a>
 
 <details>
-  <summary><h2>📂 Emplacement des données</h2></summary>
+  <summary><h3>📂 Emplacement des données</h3></summary>
 
 Le chemin du projet observé dans l’arborescence de travail est la racine du dépôt. Les chemins absolus sur le serveur distant dépendent de l’hébergement et sont **à vérifier**.
 
@@ -288,7 +288,7 @@ Le chemin du projet observé dans l’arborescence de travail est la racine du d
 <a id="base-de-données"></a>
 
 <details>
-  <summary><h2>🗄️ Base de données</h2></summary>
+  <summary><h3>🗄️ Base de données</h3></summary>
 
 Aucune base de données n’est utilisée par le scanner : il n’y a ni connexion, ni requête SQL, ni table, ni migration.
 
@@ -299,7 +299,7 @@ L’extension `pdo_mysql` est seulement **vérifiée** (présence) car PrestaSho
 <a id="fichiers-et-répertoires-importants"></a>
 
 <details>
-  <summary><h2>🗂️ Fichiers et répertoires importants</h2></summary>
+  <summary><h3>🗂️ Fichiers et répertoires importants</h3></summary>
 
 ```text
 prestashop-security-scanner/
@@ -322,7 +322,7 @@ prestashop-security-scanner/
 <a id="sécurité"></a>
 
 <details>
-  <summary><h2>🔐 Sécurité</h2></summary>
+  <summary><h3>🔐 Sécurité</h3></summary>
 
 ### Mesures présentes dans le code
 
@@ -352,7 +352,7 @@ prestashop-security-scanner/
 <a id="protection-du-répertoire"></a>
 
 <details>
-  <summary><h2>🛡️ Protection du répertoire</h2></summary>
+  <summary><h3>🛡️ Protection du répertoire</h3></summary>
 
 Le script n’est pas livré avec un fichier `.htaccess`. Si vous devez le laisser en place temporairement, protégez son accès.
 
@@ -402,7 +402,7 @@ Après installation, testez depuis un navigateur ou `curl` que le chemin direct 
 <a id="configuration-apache--nginx"></a>
 
 <details>
-  <summary><h2>⚙️ Configuration Apache / Nginx</h2></summary>
+  <summary><h3>⚙️ Configuration Apache / Nginx</h3></summary>
 
 * Le code ne requiert **aucune règle de réécriture d’URL**. L’interface web utilise le même fichier avec des paramètres de requête (`?export_csv=1`, `?export_json=1`, `?export_html=1`, `?fix_permissions=1`, `?fix_phpunit=1`).
 * **Aucune dépendance à o2switch ou à un hébergeur particulier** n’est codée. Le script fonctionne sur tout serveur exécutant PHP.
@@ -416,7 +416,7 @@ Après installation, testez depuis un navigateur ou `curl` que le chemin direct 
 <a id="variables-denvironnement-et-configuration"></a>
 
 <details>
-  <summary><h2>🔧 Variables d’environnement et configuration</h2></summary>
+  <summary><h3>🔧 Variables d’environnement et configuration</h3></summary>
 
 Aucune variable d’environnement dédiée n’est lue par le code : aucun appel à `getenv()` ni lecture de `$_ENV` n’a été observé.
 
@@ -440,7 +440,7 @@ Ne copiez jamais de rapport de scan contenant des chemins internes ou des extrai
 <a id="identifiants-et-comptes"></a>
 
 <details>
-  <summary><h2>👥 Identifiants et comptes</h2></summary>
+  <summary><h3>👥 Identifiants et comptes</h3></summary>
 
 * Il n’existe **aucun système d’authentification** : pas de table d’utilisateurs, pas de login, pas de rôle, pas de jeton.
 * Le script ne demande et ne stocke **aucun identifiant** : ni base de données, ni API, ni compte administrateur PrestaShop.
@@ -453,7 +453,7 @@ Ne copiez jamais de rapport de scan contenant des chemins internes ou des extrai
 <a id="api-et-services-externes"></a>
 
 <details>
-  <summary><h2>🔌 API et services externes</h2></summary>
+  <summary><h3>🔌 API et services externes</h3></summary>
 
 Le script n’appelle **aucune API nécessitant une clé ou un compte**. Il propose simplement des liens vers des services externes gratuits et effectue une requête sortante pour son propre audit d’en-têtes.
 
@@ -475,7 +475,7 @@ Aucune clé API, aucun jeton, aucun cookie et aucun identifiant ne sont transmis
 <a id="utilisation--interface-web"></a>
 
 <details>
-  <summary><h2>🖥️ Utilisation — Interface web</h2></summary>
+  <summary><h3>🖥️ Utilisation — Interface web</h3></summary>
 
 Ouvrez simplement `scanner.php` dans un navigateur : `https://votre-site.com/scanner.php`.
 
@@ -503,7 +503,7 @@ Le rapport affiche :
 <a id="utilisation--ligne-de-commande-cli"></a>
 
 <details>
-  <summary><h2>💻 Utilisation — Ligne de commande (CLI)</h2></summary>
+  <summary><h3>💻 Utilisation — Ligne de commande (CLI)</h3></summary>
 
 Le script détecte automatiquement le mode CLI (`PHP_SAPI === 'cli'`). Aucune interface HTML n’est générée : le rapport est affiché en texte, puis le script se termine. Idéal pour un cron ou une CI.
 
@@ -552,7 +552,7 @@ Si `--path` pointe vers un dossier inexistant, le script écrit l’erreur sur `
 <a id="moteur-de-détection"></a>
 
 <details>
-  <summary><h2>🔎 Moteur de détection</h2></summary>
+  <summary><h3>🔎 Moteur de détection</h3></summary>
 
 ### Répertoires analysés
 
@@ -597,7 +597,7 @@ Chaque détection inclut le **chemin complet**, le **numéro de ligne**, un **ex
 <a id="scans-externes-gratuits"></a>
 
 <details>
-  <summary><h2>🦠 Scans externes gratuits</h2></summary>
+  <summary><h3>🦠 Scans externes gratuits</h3></summary>
 
 Le rapport propose des liens vers quatre services **100 % gratuits**, sans compte ni clé API :
 
@@ -613,7 +613,7 @@ Le rapport propose des liens vers quatre services **100 % gratuits**, sans compt
 <a id="sauvegarde"></a>
 
 <details>
-  <summary><h2>💾 Sauvegarde</h2></summary>
+  <summary><h3>💾 Sauvegarde</h3></summary>
 
 Le scanner ne stocke rien : il n’y a **aucune donnée applicative à sauvegarder**. Il n’écrit ni fichier de configuration, ni cache, ni journal.
 
@@ -634,7 +634,7 @@ Avant un audit, sauvegardez néanmoins :
 <a id="mise-à-jour"></a>
 
 <details>
-  <summary><h2>⬆️ Mise à jour</h2></summary>
+  <summary><h3>⬆️ Mise à jour</h3></summary>
 
 1. Sauvegardez vos personnalisations (whitelist, motifs, `data/skimmer-domains.txt`).
 2. Remplacez `scanner.php` par la nouvelle version.
@@ -649,7 +649,7 @@ Aucun mécanisme de migration, aucune dépendance à mettre à jour et aucune ba
 <a id="désinstallation"></a>
 
 <details>
-  <summary><h2>🧹 Désinstallation</h2></summary>
+  <summary><h3>🧹 Désinstallation</h3></summary>
 
 Pour supprimer complètement le scanner :
 
@@ -667,7 +667,7 @@ Il n’y a aucune base de données applicative, aucun compte et aucun cache à s
 <a id="dépannage"></a>
 
 <details>
-  <summary><h2>🧰 Dépannage</h2></summary>
+  <summary><h3>🧰 Dépannage</h3></summary>
 
 | Symptôme | Vérification | Solution |
 | --- | --- | --- |
@@ -694,7 +694,7 @@ Il n’y a aucune base de données applicative, aucun compte et aucun cache à s
 <a id="logs-et-diagnostic"></a>
 
 <details>
-  <summary><h2>🩺 Logs et diagnostic</h2></summary>
+  <summary><h3>🩺 Logs et diagnostic</h3></summary>
 
 Le code **n’écrit pas de journal applicatif dédié** et n’appelle pas `error_log()`. Les erreurs PHP sont affichées dans la page grâce à `ini_set('display_errors', 1)` et `error_reporting(E_ALL)`, et les erreurs d’argument CLI sont écrites sur `STDERR`.
 
@@ -713,7 +713,7 @@ Pour un diagnostic :
 <a id="architecture"></a>
 
 <details>
-  <summary><h2>🏗️ Architecture</h2></summary>
+  <summary><h3>🏗️ Architecture</h3></summary>
 
 ```text
 Navigateur  ──HTTPS──►  scanner.php
@@ -745,7 +745,7 @@ Le script est **monofichier** et sans état : il lit les fichiers du site, const
 <a id="sécurité-en-production"></a>
 
 <details>
-  <summary><h2>✅ Sécurité en production</h2></summary>
+  <summary><h3>✅ Sécurité en production</h3></summary>
 
 - [ ] `scanner.php` **supprimé du serveur** après l’audit.
 - [ ] Si le script doit rester en place : accès protégé par mot de passe ou par IP.
@@ -765,7 +765,7 @@ Le script est **monofichier** et sans état : il lit les fichiers du site, const
 <a id="avertissement"></a>
 
 <details>
-  <summary><h2>⚠️ Avertissement</h2></summary>
+  <summary><h3>⚠️ Avertissement</h3></summary>
 
 Rien ne garantit qu’un scan détecte 100 % des menaces. Ce script est un outil d’aide à la décision : il **oriente** les vérifications, il ne les remplace pas.
 
@@ -782,7 +782,7 @@ En cas de doute sur une compromission, faites appel à un professionnel de la s�
 <a id="résumé-de-linstallation"></a>
 
 <details>
-  <summary><h2>📋 Résumé de l’installation</h2></summary>
+  <summary><h3>📋 Résumé de l’installation</h3></summary>
 
 1. Déposez le dossier `prestashop-security-scanner/` **à la base du dossier PrestaShop** (ou copiez `scanner.php` seul **à la racine** de la boutique).
 2. Vérifiez que le dossier `data/` (avec `skimmer-domains.txt`) est bien au même niveau que `scanner.php`.
@@ -797,7 +797,7 @@ La version PHP active, les permissions système, les journaux, les règles serve
 
 <details>
 
-  <summary><h2>⚠️ Limites connues</h2></summary>
+  <summary><h3>⚠️ Limites connues</h3></summary>
 
 1. **Aucune garantie de détection exhaustive** : le scan couvre plus de 150 motifs, mais un code malveillant inédit ou volontairement discret peut passer. Le rapport **oriente** les vérifications, il ne les remplace pas.
 2. **Analyse statique uniquement** : le script lit le contenu des fichiers ; il n’exécute aucun code, n’interroge pas la base de données et ne détecte donc pas un skimmer « stocké » uniquement en base (ex. `ps_configuration`, `ps_hook_module`).
