@@ -17,6 +17,7 @@
 **Scanner de sécutité pour PrestaShop** - Audit automatique des fichiers, de la configuration et des en-têtes HTTP.
 
 _Script monofichier `scanner.php` (+ `data/skimmer-domains.txt`)_ — Version : **2.2.0** · Licence : **AFL-3.0**
+
 _`Début du projet le 30/09/2025`_
 
 ![PrestaShop Security Scanner](img/prestashop-security-scanner.jpg)
